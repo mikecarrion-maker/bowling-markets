@@ -31,6 +31,10 @@
         <label>Your name</label>
         <select id="myName"><option value="">Select your name to see your bets</option></select>
       </div>
+      <div>
+        <label>PIN</label>
+        <input id="myPin" type="password" inputmode="numeric" placeholder="if set" style="width:100px;" />
+      </div>
       <button class="btn secondary" onclick="loadMyBets()">Show my bets</button>
     </div>
     <table id="betsTable">
@@ -40,6 +44,7 @@
       <tbody id="betsBody"></tbody>
     </table>
     <div id="noBets" class="small hidden">No bets found for that name yet.</div>
+    <div id="betsError" class="small hidden" style="color:var(--red);">Incorrect PIN for that name.</div>
   </div>
 </main>
 
@@ -201,19 +206,28 @@ function showToast(msg) {
   setTimeout(() => t.classList.add('hidden'), 3500);
 }
 
-async function loadMyBets() {
+async function loadMyBets(opts = {}) {
   const name = document.getElementById('myName').value.trim();
+  const pin = document.getElementById('myPin').value.trim();
   const body = document.getElementById('betsBody');
   const noBets = document.getElementById('noBets');
+  const errEl = document.getElementById('betsError');
   body.innerHTML = '';
+  noBets.classList.add('hidden');
+  errEl.classList.add('hidden');
   if (!name) return;
-  const res = await fetch('/api/bets?bettorName=' + encodeURIComponent(name));
+  const res = await fetch('/api/bets?bettorName=' + encodeURIComponent(name) + '&pin=' + encodeURIComponent(pin));
+  if (res.status === 401) {
+    if (!opts.silent) errEl.classList.remove('hidden');
+    return;
+  }
   const bets = await res.json();
+  if (!res.ok) return;
+  localStorage.setItem('bettorPin', pin);
   if (bets.length === 0) {
     noBets.classList.remove('hidden');
     return;
   }
-  noBets.classList.add('hidden');
   bets.forEach(b => {
     const tr = document.createElement('tr');
     let line = '—';
@@ -241,9 +255,11 @@ async function loadMyBets() {
   await loadPlayers();
   setInterval(loadPlayers, 5000);
   const savedName = localStorage.getItem('bettorName');
+  const savedPin = localStorage.getItem('bettorPin') || '';
+  document.getElementById('myPin').value = savedPin;
   if (savedName && bettors.includes(savedName)) {
     document.getElementById('myName').value = savedName;
-    loadMyBets();
+    loadMyBets({ silent: true });
   }
 })();
 </script>

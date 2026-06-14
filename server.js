@@ -44,6 +44,8 @@ function defaultData() {
 
 function normalize(data) {
   if (!Array.isArray(data.bettors)) data.bettors = [];
+  // migrate old format (array of name strings) to { name, pin } objects
+  data.bettors = data.bettors.map(b => (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' });
   if (!Array.isArray(data.players)) data.players = [];
   if (!Array.isArray(data.bets)) data.bets = [];
   if (!data.settings) data.settings = defaultData().settings;
@@ -221,33 +223,60 @@ app.put('/api/settings', requireAdmin, async (req, res) => {
 
 // ---------- eligible bettors ----------
 
+function sortedBettorNames(data) {
+  return data.bettors.map(b => b.name).sort((a, b) => a.localeCompare(b));
+}
+
+function adminBettorList(data) {
+  return data.bettors
+    .map(b => ({ name: b.name, hasPin: !!b.pin }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // Public: list of names for the bettor-view dropdown.
 app.get('/api/bettors', async (req, res) => {
   const data = await loadData();
-  res.json([...data.bettors].sort((a, b) => a.localeCompare(b)));
+  res.json(sortedBettorNames(data));
+});
+
+// Admin: full list including whether each bettor has a PIN set.
+app.get('/api/admin/bettors', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  res.json(adminBettorList(data));
 });
 
 app.post('/api/bettors', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const { name } = req.body;
+  const { name, pin } = req.body;
   const trimmed = name == null ? '' : String(name).trim();
   if (!trimmed) return res.status(400).json({ error: 'name is required' });
-  if (data.bettors.some(b => b.toLowerCase() === trimmed.toLowerCase())) {
+  if (data.bettors.some(b => b.name.toLowerCase() === trimmed.toLowerCase())) {
     return res.status(400).json({ error: 'that name is already on the list' });
   }
-  data.bettors.push(trimmed);
+  data.bettors.push({ name: trimmed, pin: pin ? String(pin).trim() : '' });
   await saveData(data);
-  res.status(201).json([...data.bettors].sort((a, b) => a.localeCompare(b)));
+  res.status(201).json(adminBettorList(data));
+});
+
+// Admin: set, change, or clear (empty pin) a bettor's PIN.
+app.put('/api/bettors/:name', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const target = req.params.name.toLowerCase();
+  const bettor = data.bettors.find(b => b.name.toLowerCase() === target);
+  if (!bettor) return res.status(404).json({ error: 'name not found' });
+  bettor.pin = req.body.pin ? String(req.body.pin).trim() : '';
+  await saveData(data);
+  res.json(adminBettorList(data));
 });
 
 app.delete('/api/bettors/:name', requireAdmin, async (req, res) => {
   const data = await loadData();
   const target = req.params.name.toLowerCase();
   const before = data.bettors.length;
-  data.bettors = data.bettors.filter(b => b.toLowerCase() !== target);
+  data.bettors = data.bettors.filter(b => b.name.toLowerCase() !== target);
   if (data.bettors.length === before) return res.status(404).json({ error: 'name not found' });
   await saveData(data);
-  res.json([...data.bettors].sort((a, b) => a.localeCompare(b)));
+  res.json(adminBettorList(data));
 });
 
 // ---------- players / markets ----------
@@ -463,7 +492,17 @@ app.get('/api/bets', async (req, res) => {
   const data = await loadData();
   let bets = data.bets;
   if (req.query.playerId) bets = bets.filter(b => b.playerId === req.query.playerId);
-  if (req.query.bettorName) bets = bets.filter(b => b.bettorName.toLowerCase() === String(req.query.bettorName).toLowerCase());
+  if (req.query.bettorName) {
+    const name = String(req.query.bettorName);
+    const bettor = data.bettors.find(b => b.name.toLowerCase() === name.toLowerCase());
+    if (bettor && bettor.pin) {
+      const providedPin = req.query.pin == null ? '' : String(req.query.pin);
+      if (providedPin !== bettor.pin) {
+        return res.status(401).json({ error: 'incorrect pin' });
+      }
+    }
+    bets = bets.filter(b => b.bettorName.toLowerCase() === name.toLowerCase());
+  }
   bets = [...bets].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   const playerNames = Object.fromEntries(data.players.map(p => [p.id, p.name]));
   res.json(bets.map(b => ({ ...b, playerName: playerNames[b.playerId] || '?' })));
@@ -497,11 +536,11 @@ app.post('/api/bets', async (req, res) => {
   }
   let canonicalName = String(bettorName).trim();
   if (data.bettors.length > 0) {
-    const match = data.bettors.find(b => b.toLowerCase() === canonicalName.toLowerCase());
+    const match = data.bettors.find(b => b.name.toLowerCase() === canonicalName.toLowerCase());
     if (!match) {
       return res.status(400).json({ error: 'select your name from the bettors list' });
     }
-    canonicalName = match;
+    canonicalName = match.name;
   }
   const stakeNum = Number(stake);
   if (!(stakeNum > 0)) {
