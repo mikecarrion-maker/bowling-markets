@@ -110,17 +110,11 @@ function render() {
         <div class="player-name">${escapeHtml(p.name)}</div>
         <div class="player-meta">${statusBadge}</div>
       </div>
-      <div class="market">
-        <button class="side-btn under" ${disabled(p)} onclick='openModal(${JSON.stringify(p.id)}, "under")'>
-          Hit Bid (Under)
-          <span class="price">${p.bid}</span>
-          <span class="size">size $${p.bidSize}</span>
-        </button>
-        <button class="side-btn over" ${disabled(p)} onclick='openModal(${JSON.stringify(p.id)}, "over")'>
-          Lift Offer (Over)
-          <span class="price">${p.offer}</span>
-          <span class="size">size $${p.offerSize}</span>
-        </button>
+      <div class="market rail">
+        <span class="price under ${disabled(p) ? 'disabled' : ''}" ${disabled(p) ? '' : `onclick='openModal(${JSON.stringify(p.id)}, "under")'`}>${p.bid}</span>
+        <span class="slash">/</span>
+        <span class="price over ${disabled(p) ? 'disabled' : ''}" ${disabled(p) ? '' : `onclick='openModal(${JSON.stringify(p.id)}, "over")'`}>${p.offer}</span>
+        <span class="size">${p.bidSize} x ${p.offerSize}</span>
       </div>
     `;
     container.appendChild(div);
