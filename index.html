@@ -29,7 +29,7 @@
     <div class="form-row">
       <div style="flex:1;">
         <label>Your name</label>
-        <input id="myName" type="text" placeholder="Enter your name to see your bets" />
+        <select id="myName"><option value="">Select your name to see your bets</option></select>
       </div>
       <button class="btn secondary" onclick="loadMyBets()">Show my bets</button>
     </div>
@@ -49,7 +49,7 @@
     <div class="form-row">
       <div style="flex:1;">
         <label>Your name</label>
-        <input id="betName" type="text" placeholder="Name" />
+        <select id="betName"><option value="">Select your name</option></select>
       </div>
     </div>
     <div class="form-row">
@@ -71,7 +71,16 @@
 
 <script>
 let players = [];
+let bettors = [];
 let pendingBet = null; // { playerId, side, player }
+
+async function loadBettors() {
+  const res = await fetch('/api/bettors');
+  bettors = await res.json();
+  const options = bettors.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+  document.getElementById('myName').innerHTML = '<option value="">Select your name to see your bets</option>' + options;
+  document.getElementById('betName').innerHTML = '<option value="">Select your name</option>' + options;
+}
 
 const STATUS_LABELS = {
   paused: 'Betting paused',
@@ -227,13 +236,16 @@ async function loadMyBets() {
   });
 }
 
-loadPlayers();
-setInterval(loadPlayers, 5000);
-const savedName = localStorage.getItem('bettorName');
-if (savedName) {
-  document.getElementById('myName').value = savedName;
-  loadMyBets();
-}
+(async () => {
+  await loadBettors();
+  await loadPlayers();
+  setInterval(loadPlayers, 5000);
+  const savedName = localStorage.getItem('bettorName');
+  if (savedName && bettors.includes(savedName)) {
+    document.getElementById('myName').value = savedName;
+    loadMyBets();
+  }
+})();
 </script>
 </body>
 </html>

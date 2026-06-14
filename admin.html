@@ -45,6 +45,22 @@
     </div>
   </div>
 
+  <div class="section-title">Eligible Bettors</div>
+  <div class="card">
+    <p class="small">
+      Names added here show up as a dropdown on the bettor view, so everyone bets under one consistent
+      name (e.g. avoid "Matt" vs "Matthew").
+    </p>
+    <div class="form-row">
+      <div style="flex:1;">
+        <label>Add a name</label>
+        <input id="newBettorName" type="text" placeholder="e.g. Matthew Smith" />
+      </div>
+      <button class="btn" onclick="addBettor()">Add</button>
+    </div>
+    <div id="bettorsList" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
+  </div>
+
   <div class="section-title">
     Pending Requests <span id="pendingBadge" class="notif-badge hidden">0</span>
   </div>
@@ -268,6 +284,55 @@ async function clearPasscode() {
   localStorage.removeItem('adminPasscode');
   showToast('Passcode removed.');
   await loadSettings();
+}
+
+// ---------- eligible bettors ----------
+
+async function loadBettors() {
+  const res = await adminFetch('/api/bettors');
+  const bettors = await res.json();
+  const listEl = document.getElementById('bettorsList');
+  listEl.innerHTML = '';
+  if (bettors.length === 0) {
+    listEl.innerHTML = '<div class="small">No bettors added yet — add names above so they appear in the dropdown on the bettor view.</div>';
+    return;
+  }
+  bettors.forEach(name => {
+    const chip = document.createElement('div');
+    chip.style.cssText = 'display:flex; align-items:center; gap:6px; background:#f3f4f6; border-radius:999px; padding:4px 6px 4px 12px; font-size:13px;';
+    chip.innerHTML = `<span>${escapeHtml(name)}</span>`;
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn danger';
+    removeBtn.style.cssText = 'padding:2px 8px; font-size:11px; border-radius:999px;';
+    removeBtn.textContent = '×';
+    removeBtn.onclick = () => removeBettor(name);
+    chip.appendChild(removeBtn);
+    listEl.appendChild(chip);
+  });
+}
+
+async function addBettor() {
+  const input = document.getElementById('newBettorName');
+  const name = input.value.trim();
+  if (!name) return;
+  const res = await adminFetch('/api/bettors', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  });
+  const data = await res.json();
+  if (!res.ok) { showToast(data.error || 'Could not add name.'); return; }
+  input.value = '';
+  showToast(`Added ${name}.`);
+  await loadBettors();
+}
+
+async function removeBettor(name) {
+  if (!confirm(`Remove "${name}" from the bettors list?`)) return;
+  const res = await adminFetch(`/api/bettors/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!res.ok) { showToast('Could not remove name.'); return; }
+  showToast('Bettor removed.');
+  await loadBettors();
 }
 
 // ---------- players ----------
@@ -601,7 +666,7 @@ async function loadBets() {
 
 async function loadAll() {
   await loadPlayers();
-  await Promise.all([loadPending(), loadExposure(), loadBets()]);
+  await Promise.all([loadPending(), loadExposure(), loadBets(), loadBettors()]);
 }
 
 async function init() {

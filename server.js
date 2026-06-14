@@ -34,14 +34,17 @@ function defaultData() {
       adminPasscode: ''   // '' = no passcode set yet, /admin is open
     },
     players: [],
-    bets: []
+    bets: [],
+    bettors: []
   };
 }
 
 function loadData() {
   try {
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    return JSON.parse(raw);
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data.bettors)) data.bettors = [];
+    return data;
   } catch (e) {
     const data = defaultData();
     saveData(data);
@@ -160,6 +163,37 @@ app.put('/api/settings', requireAdmin, (req, res) => {
   saveData(data);
   const { adminPasscode: _omit, ...rest } = data.settings;
   res.json({ ...rest, passcodeSet: !!data.settings.adminPasscode });
+});
+
+// ---------- eligible bettors ----------
+
+// Public: list of names for the bettor-view dropdown.
+app.get('/api/bettors', (req, res) => {
+  const data = loadData();
+  res.json([...data.bettors].sort((a, b) => a.localeCompare(b)));
+});
+
+app.post('/api/bettors', requireAdmin, (req, res) => {
+  const data = loadData();
+  const { name } = req.body;
+  const trimmed = name == null ? '' : String(name).trim();
+  if (!trimmed) return res.status(400).json({ error: 'name is required' });
+  if (data.bettors.some(b => b.toLowerCase() === trimmed.toLowerCase())) {
+    return res.status(400).json({ error: 'that name is already on the list' });
+  }
+  data.bettors.push(trimmed);
+  saveData(data);
+  res.status(201).json([...data.bettors].sort((a, b) => a.localeCompare(b)));
+});
+
+app.delete('/api/bettors/:name', requireAdmin, (req, res) => {
+  const data = loadData();
+  const target = req.params.name.toLowerCase();
+  const before = data.bettors.length;
+  data.bettors = data.bettors.filter(b => b.toLowerCase() !== target);
+  if (data.bettors.length === before) return res.status(404).json({ error: 'name not found' });
+  saveData(data);
+  res.json([...data.bettors].sort((a, b) => a.localeCompare(b)));
 });
 
 // ---------- players / markets ----------
@@ -407,6 +441,14 @@ app.post('/api/bets', (req, res) => {
   if (side !== 'over' && side !== 'under') {
     return res.status(400).json({ error: "side must be 'over' or 'under'" });
   }
+  let canonicalName = String(bettorName).trim();
+  if (data.bettors.length > 0) {
+    const match = data.bettors.find(b => b.toLowerCase() === canonicalName.toLowerCase());
+    if (!match) {
+      return res.status(400).json({ error: 'select your name from the bettors list' });
+    }
+    canonicalName = match;
+  }
   const stakeNum = Number(stake);
   if (!(stakeNum > 0)) {
     return res.status(400).json({ error: 'stake must be a positive number' });
@@ -421,7 +463,7 @@ app.post('/api/bets', (req, res) => {
   const bet = {
     id: id('b'),
     playerId,
-    bettorName: String(bettorName).trim(),
+    bettorName: canonicalName,
     side,
     stake: stakeNum,
     timestamp: new Date().toISOString(),
