@@ -1,5 +1,7 @@
 // Bowling Tournament Markets - server
-// Express app with JSON-file storage. Depth-based bid/offer markets.
+// Express app. Depth-based bid/offer markets.
+// Storage: Postgres (DATABASE_URL) if set, otherwise a local JSON file
+//   (falls back automatically so local dev still works without a database).
 // Run: npm install && npm start   -> http://localhost:3000
 //   /        -> bettor view (share this link)
 //   /admin   -> market maker dashboard
@@ -11,6 +13,7 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'db.json');
+const DATABASE_URL = process.env.DATABASE_URL || '';
 
 const app = express();
 app.use(express.json());
@@ -39,20 +42,71 @@ function defaultData() {
   };
 }
 
-function loadData() {
+function normalize(data) {
+  if (!Array.isArray(data.bettors)) data.bettors = [];
+  if (!Array.isArray(data.players)) data.players = [];
+  if (!Array.isArray(data.bets)) data.bets = [];
+  if (!data.settings) data.settings = defaultData().settings;
+  return data;
+}
+
+let pool = null;
+let dbReady = null;
+
+if (DATABASE_URL) {
+  const { Pool } = require('pg');
+  pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+  dbReady = pool.query(`
+    CREATE TABLE IF NOT EXISTS app_data (
+      id INT PRIMARY KEY,
+      data JSONB NOT NULL
+    )
+  `).then(async () => {
+    const res = await pool.query('SELECT data FROM app_data WHERE id = 1');
+    if (res.rows.length === 0) {
+      await pool.query('INSERT INTO app_data (id, data) VALUES (1, $1)', [JSON.stringify(defaultData())]);
+    }
+  }).catch(err => {
+    console.error('Failed to initialize database:', err);
+  });
+
+  console.log('Storage: Postgres (DATABASE_URL set)');
+} else {
+  console.log('Storage: local JSON file (set DATABASE_URL for persistent storage)');
+}
+
+async function loadData() {
+  if (pool) {
+    if (dbReady) await dbReady;
+    const res = await pool.query('SELECT data FROM app_data WHERE id = 1');
+    if (res.rows.length === 0) {
+      const data = defaultData();
+      await saveData(data);
+      return data;
+    }
+    return normalize(res.rows[0].data);
+  }
   try {
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    const data = JSON.parse(raw);
-    if (!Array.isArray(data.bettors)) data.bettors = [];
-    return data;
+    return normalize(JSON.parse(raw));
   } catch (e) {
     const data = defaultData();
-    saveData(data);
+    await saveData(data);
     return data;
   }
 }
 
-function saveData(data) {
+async function saveData(data) {
+  if (pool) {
+    await pool.query(
+      'INSERT INTO app_data (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = $1',
+      [JSON.stringify(data)]
+    );
+    return;
+  }
   fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
@@ -129,8 +183,8 @@ function fillBet(player, side, stake, settings) {
   }
 }
 
-function requireAdmin(req, res, next) {
-  const data = loadData();
+async function requireAdmin(req, res, next) {
+  const data = await loadData();
   const passcode = data.settings.adminPasscode || '';
   if (!passcode) return next(); // not configured yet - admin is open
   const provided = req.headers['x-admin-passcode'] || '';
@@ -140,27 +194,27 @@ function requireAdmin(req, res, next) {
 
 // ---------- public status ----------
 
-app.get('/api/admin/status', (req, res) => {
-  const data = loadData();
+app.get('/api/admin/status', async (req, res) => {
+  const data = await loadData();
   res.json({ passcodeSet: !!data.settings.adminPasscode });
 });
 
 // ---------- settings ----------
 
-app.get('/api/settings', (req, res) => {
-  const data = loadData();
+app.get('/api/settings', async (req, res) => {
+  const data = await loadData();
   // never expose the passcode itself to plain GETs without auth
   const { adminPasscode, ...rest } = data.settings;
   res.json({ ...rest, passcodeSet: !!adminPasscode });
 });
 
-app.put('/api/settings', requireAdmin, (req, res) => {
-  const data = loadData();
+app.put('/api/settings', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const { standardSize, moveIncrement, adminPasscode } = req.body;
   if (standardSize != null) data.settings.standardSize = Number(standardSize);
   if (moveIncrement != null) data.settings.moveIncrement = Number(moveIncrement);
   if (adminPasscode !== undefined) data.settings.adminPasscode = String(adminPasscode || '');
-  saveData(data);
+  await saveData(data);
   const { adminPasscode: _omit, ...rest } = data.settings;
   res.json({ ...rest, passcodeSet: !!data.settings.adminPasscode });
 });
@@ -168,13 +222,13 @@ app.put('/api/settings', requireAdmin, (req, res) => {
 // ---------- eligible bettors ----------
 
 // Public: list of names for the bettor-view dropdown.
-app.get('/api/bettors', (req, res) => {
-  const data = loadData();
+app.get('/api/bettors', async (req, res) => {
+  const data = await loadData();
   res.json([...data.bettors].sort((a, b) => a.localeCompare(b)));
 });
 
-app.post('/api/bettors', requireAdmin, (req, res) => {
-  const data = loadData();
+app.post('/api/bettors', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const { name } = req.body;
   const trimmed = name == null ? '' : String(name).trim();
   if (!trimmed) return res.status(400).json({ error: 'name is required' });
@@ -182,31 +236,31 @@ app.post('/api/bettors', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'that name is already on the list' });
   }
   data.bettors.push(trimmed);
-  saveData(data);
+  await saveData(data);
   res.status(201).json([...data.bettors].sort((a, b) => a.localeCompare(b)));
 });
 
-app.delete('/api/bettors/:name', requireAdmin, (req, res) => {
-  const data = loadData();
+app.delete('/api/bettors/:name', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const target = req.params.name.toLowerCase();
   const before = data.bettors.length;
   data.bettors = data.bettors.filter(b => b.toLowerCase() !== target);
   if (data.bettors.length === before) return res.status(404).json({ error: 'name not found' });
-  saveData(data);
+  await saveData(data);
   res.json([...data.bettors].sort((a, b) => a.localeCompare(b)));
 });
 
 // ---------- players / markets ----------
 
 // Public list (bettor view)
-app.get('/api/players', (req, res) => {
-  const data = loadData();
+app.get('/api/players', async (req, res) => {
+  const data = await loadData();
   res.json(data.players.map(publicPlayer));
 });
 
 // Full detail (admin view)
-app.get('/api/admin/players', requireAdmin, (req, res) => {
-  const data = loadData();
+app.get('/api/admin/players', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const enriched = data.players.map(p => {
     const bets = data.bets.filter(b => b.playerId === p.id);
     const pendingCount = bets.filter(b => b.status === 'pending').length;
@@ -215,8 +269,8 @@ app.get('/api/admin/players', requireAdmin, (req, res) => {
   res.json(enriched);
 });
 
-app.post('/api/players', requireAdmin, (req, res) => {
-  const data = loadData();
+app.post('/api/players', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const { name, bid, offer, bidSize, offerSize, standardSize, moveIncrement, autoMoveEnabled } = req.body;
   if (!name || bid == null || offer == null) {
     return res.status(400).json({ error: 'name, bid and offer are required' });
@@ -240,13 +294,13 @@ app.post('/api/players', requireAdmin, (req, res) => {
   player.offerSize = offerSize != null && offerSize !== '' ? Number(offerSize) : eff.standardSize;
 
   data.players.push(player);
-  saveData(data);
+  await saveData(data);
   res.status(201).json(player);
 });
 
 // Manual override of a player's market / config / pause-resume
-app.put('/api/players/:id', requireAdmin, (req, res) => {
-  const data = loadData();
+app.put('/api/players/:id', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const player = data.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status === 'settled' || player.status === 'voided') {
@@ -276,23 +330,23 @@ app.put('/api/players/:id', requireAdmin, (req, res) => {
     player.status = status;
   }
 
-  saveData(data);
+  await saveData(data);
   res.json(player);
 });
 
-app.delete('/api/players/:id', requireAdmin, (req, res) => {
-  const data = loadData();
+app.delete('/api/players/:id', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const before = data.players.length;
   data.players = data.players.filter(p => p.id !== req.params.id);
   if (data.players.length === before) return res.status(404).json({ error: 'player not found' });
   data.bets = data.bets.filter(b => b.playerId !== req.params.id);
-  saveData(data);
+  await saveData(data);
   res.json({ ok: true });
 });
 
 // Settle a player's market: enter the final score, grade all open bets.
-app.post('/api/players/:id/settle', requireAdmin, (req, res) => {
-  const data = loadData();
+app.post('/api/players/:id/settle', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const player = data.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status === 'settled' || player.status === 'voided') {
@@ -331,13 +385,13 @@ app.post('/api/players/:id/settle', requireAdmin, (req, res) => {
     else b.payout = 0;
   });
 
-  saveData(data);
+  await saveData(data);
   res.json({ player, bets: data.bets.filter(b => b.playerId === player.id), declinedPending });
 });
 
 // Reopen a settled or voided market (undo)
-app.post('/api/players/:id/reopen', requireAdmin, (req, res) => {
-  const data = loadData();
+app.post('/api/players/:id/reopen', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const player = data.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
   player.status = 'open';
@@ -348,13 +402,13 @@ app.post('/api/players/:id/reopen', requireAdmin, (req, res) => {
       b.payout = null;
     }
   });
-  saveData(data);
+  await saveData(data);
   res.json(player);
 });
 
 // Void a player's market entirely: no contest, refund every open bet.
-app.post('/api/players/:id/void', requireAdmin, (req, res) => {
-  const data = loadData();
+app.post('/api/players/:id/void', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const player = data.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status === 'settled' || player.status === 'voided') {
@@ -372,14 +426,14 @@ app.post('/api/players/:id/void', requireAdmin, (req, res) => {
       b.payout = 0;
     }
   });
-  saveData(data);
+  await saveData(data);
   res.json({ player, bets: data.bets.filter(b => b.playerId === player.id) });
 });
 
 // ---------- exposure / risk ----------
 
-app.get('/api/admin/exposure', requireAdmin, (req, res) => {
-  const data = loadData();
+app.get('/api/admin/exposure', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const rows = data.players
     .filter(p => p.status === 'open' || p.status === 'paused')
     .map(p => {
@@ -405,8 +459,8 @@ app.get('/api/admin/exposure', requireAdmin, (req, res) => {
 
 // ---------- bets ----------
 
-app.get('/api/bets', (req, res) => {
-  const data = loadData();
+app.get('/api/bets', async (req, res) => {
+  const data = await loadData();
   let bets = data.bets;
   if (req.query.playerId) bets = bets.filter(b => b.playerId === req.query.playerId);
   if (req.query.bettorName) bets = bets.filter(b => b.bettorName.toLowerCase() === String(req.query.bettorName).toLowerCase());
@@ -416,23 +470,23 @@ app.get('/api/bets', (req, res) => {
 });
 
 // Admin-only: full bet list including bettor names, for the admin bets table.
-app.get('/api/admin/bets', requireAdmin, (req, res) => {
-  const data = loadData();
+app.get('/api/admin/bets', requireAdmin, async (req, res) => {
+  const data = await loadData();
   let bets = [...data.bets].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   const playerNames = Object.fromEntries(data.players.map(p => [p.id, p.name]));
   res.json(bets.map(b => ({ ...b, playerName: playerNames[b.playerId] || '?' })));
 });
 
-app.get('/api/admin/pending', requireAdmin, (req, res) => {
-  const data = loadData();
+app.get('/api/admin/pending', requireAdmin, async (req, res) => {
+  const data = await loadData();
   let bets = data.bets.filter(b => b.status === 'pending');
   bets = bets.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
   const playerNames = Object.fromEntries(data.players.map(p => [p.id, p.name]));
   res.json(bets.map(b => ({ ...b, playerName: playerNames[b.playerId] || '?' })));
 });
 
-app.post('/api/bets', (req, res) => {
-  const data = loadData();
+app.post('/api/bets', async (req, res) => {
+  const data = await loadData();
   const { playerId, bettorName, side, stake } = req.body;
 
   if (!playerId || !bettorName || !side || stake == null) {
@@ -482,13 +536,13 @@ app.post('/api/bets', (req, res) => {
   }
 
   data.bets.push(bet);
-  saveData(data);
+  await saveData(data);
   res.status(201).json({ bet, player });
 });
 
 // Accept a pending bet: locks in the CURRENT price, consumes size, may trigger auto-move.
-app.post('/api/bets/:id/accept', requireAdmin, (req, res) => {
-  const data = loadData();
+app.post('/api/bets/:id/accept', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const bet = data.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'pending') return res.status(400).json({ error: 'bet is not pending' });
@@ -500,31 +554,31 @@ app.post('/api/bets/:id/accept', requireAdmin, (req, res) => {
   bet.status = 'open';
   fillBet(player, bet.side, bet.stake, data.settings);
 
-  saveData(data);
+  await saveData(data);
   res.json({ bet, player });
 });
 
-app.post('/api/bets/:id/decline', requireAdmin, (req, res) => {
-  const data = loadData();
+app.post('/api/bets/:id/decline', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const bet = data.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'pending') return res.status(400).json({ error: 'bet is not pending' });
   bet.status = 'declined';
   bet.payout = 0;
-  saveData(data);
+  await saveData(data);
   res.json({ bet });
 });
 
 // Cancel an open (filled) bet: refund the stake. Does not unwind any market move
 // that already happened as a result of this bet.
-app.post('/api/bets/:id/cancel', requireAdmin, (req, res) => {
-  const data = loadData();
+app.post('/api/bets/:id/cancel', requireAdmin, async (req, res) => {
+  const data = await loadData();
   const bet = data.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'open') return res.status(400).json({ error: 'only open bets can be cancelled' });
   bet.status = 'cancelled';
   bet.payout = bet.stake;
-  saveData(data);
+  await saveData(data);
   res.json({ bet });
 });
 
