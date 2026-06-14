@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bowling Tournament Markets</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+  <h1>🎳 Bowling Tournament Markets</h1>
+  <nav><a href="/admin">Market Maker Dashboard →</a></nav>
+</header>
+
+<main>
+  <div class="card small">
+    <strong>How it works:</strong> Each player has a market &mdash; a bid and an offer, each with a size shown
+    next to it (how much can be bet at that price right now).
+    <span style="color:var(--red); font-weight:600;">Hit the bid</span> if you think the player will score
+    <em>below</em> the bid. <span style="color:var(--green); font-weight:600;">Lift the offer</span> if you think
+    they'll score <em>above</em> the offer. Score lands between the two? It's a push &mdash; stake back, no win/loss.
+    If your stake is bigger than the size shown, your bet goes to the market maker for approval before it's confirmed.
+  </div>
+
+  <div id="players"></div>
+
+  <div class="section-title">My Bets</div>
+  <div class="card">
+    <div class="form-row">
+      <div style="flex:1;">
+        <label>Your name</label>
+        <input id="myName" type="text" placeholder="Enter your name to see your bets" />
+      </div>
+      <button class="btn secondary" onclick="loadMyBets()">Show my bets</button>
+    </div>
+    <table id="betsTable">
+      <thead>
+        <tr><th>Player</th><th>Side</th><th>Line</th><th>Stake</th><th>Status</th><th>Payout</th><th>When</th></tr>
+      </thead>
+      <tbody id="betsBody"></tbody>
+    </table>
+    <div id="noBets" class="small hidden">No bets found for that name yet.</div>
+  </div>
+</main>
+
+<div id="modalBackdrop" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3 id="modalTitle">Place Bet</h3>
+    <div class="form-row">
+      <div style="flex:1;">
+        <label>Your name</label>
+        <input id="betName" type="text" placeholder="Name" />
+      </div>
+    </div>
+    <div class="form-row">
+      <div style="flex:1;">
+        <label>Stake ($)</label>
+        <input id="betStake" type="number" min="1" step="1" placeholder="20" />
+      </div>
+    </div>
+    <div id="modalSizeHint" class="small"></div>
+    <div class="form-row" style="justify-content:flex-end;">
+      <button class="btn secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="submitBet()">Confirm Bet</button>
+    </div>
+    <div id="modalError" class="small" style="color:var(--red);"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script>
+let players = [];
+let pendingBet = null; // { playerId, side, player }
+
+const STATUS_LABELS = {
+  paused: 'Betting paused',
+  voided: 'Voided — no contest, refunds issued',
+  settled: null // handled specially with the final score
+};
+
+async function loadPlayers() {
+  const res = await fetch('/api/players');
+  players = await res.json();
+  render();
+}
+
+function render() {
+  const container = document.getElementById('players');
+  container.innerHTML = '';
+  if (players.length === 0) {
+    container.innerHTML = '<div class="card small">No markets yet &mdash; check back once the market maker adds players.</div>';
+    return;
+  }
+  players.forEach(p => {
+    const div = document.createElement('div');
+    div.className = 'card player-card';
+
+    let statusBadge = '';
+    if (p.status === 'settled') {
+      statusBadge = `<span class="badge settled">Settled: ${p.finalScore}</span>`;
+    } else if (p.status === 'voided') {
+      statusBadge = `<span class="badge voided">Voided — refunds issued</span>`;
+    } else if (p.status === 'paused') {
+      statusBadge = `<span class="badge paused">Betting paused</span>`;
+    }
+
+    div.innerHTML = `
+      <div>
+        <div class="player-name">${escapeHtml(p.name)}</div>
+        <div class="player-meta">${statusBadge}</div>
+      </div>
+      <div class="market">
+        <button class="side-btn under" ${disabled(p)} onclick='openModal(${JSON.stringify(p.id)}, "under")'>
+          Hit Bid (Under)
+          <span class="price">${p.bid}</span>
+          <span class="size">size $${p.bidSize}</span>
+        </button>
+        <button class="side-btn over" ${disabled(p)} onclick='openModal(${JSON.stringify(p.id)}, "over")'>
+          Lift Offer (Over)
+          <span class="price">${p.offer}</span>
+          <span class="size">size $${p.offerSize}</span>
+        </button>
+      </div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function disabled(p) {
+  return (p.status !== 'open') ? 'disabled' : '';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function openModal(playerId, side) {
+  const player = players.find(p => p.id === playerId);
+  pendingBet = { playerId, side, player };
+  const line = side === 'under' ? player.bid : player.offer;
+  const size = side === 'under' ? player.bidSize : player.offerSize;
+  const verb = side === 'under' ? 'Hit the Bid' : 'Lift the Offer';
+  document.getElementById('modalTitle').textContent =
+    `${verb} on ${player.name} @ ${line}`;
+  document.getElementById('modalSizeHint').textContent =
+    `Size available at this price: $${size}. Bigger stakes go to the market maker for approval.`;
+  document.getElementById('modalError').textContent = '';
+  const savedName = localStorage.getItem('bettorName') || '';
+  document.getElementById('betName').value = savedName;
+  document.getElementById('betStake').value = '';
+  document.getElementById('modalBackdrop').classList.remove('hidden');
+}
+
+function closeModal() {
+  document.getElementById('modalBackdrop').classList.add('hidden');
+  pendingBet = null;
+}
+
+async function submitBet() {
+  const name = document.getElementById('betName').value.trim();
+  const stake = Number(document.getElementById('betStake').value);
+  const errEl = document.getElementById('modalError');
+  if (!name) { errEl.textContent = 'Enter your name.'; return; }
+  if (!(stake > 0)) { errEl.textContent = 'Enter a stake greater than 0.'; return; }
+
+  const res = await fetch('/api/bets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      playerId: pendingBet.playerId,
+      bettorName: name,
+      side: pendingBet.side,
+      stake
+    })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    errEl.textContent = data.error || 'Something went wrong.';
+    return;
+  }
+  localStorage.setItem('bettorName', name);
+  const side = pendingBet.side === 'under' ? 'under' : 'over';
+  const player = pendingBet.player;
+  closeModal();
+  if (data.bet.status === 'pending') {
+    showToast(`Bet submitted: ${player.name} ${side} for $${stake} — waiting on market maker approval`);
+  } else {
+    showToast(`Bet placed: ${player.name} ${side} for $${stake}`);
+  }
+  await loadPlayers();
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  setTimeout(() => t.classList.add('hidden'), 3500);
+}
+
+async function loadMyBets() {
+  const name = document.getElementById('myName').value.trim();
+  const body = document.getElementById('betsBody');
+  const noBets = document.getElementById('noBets');
+  body.innerHTML = '';
+  if (!name) return;
+  const res = await fetch('/api/bets?bettorName=' + encodeURIComponent(name));
+  const bets = await res.json();
+  if (bets.length === 0) {
+    noBets.classList.remove('hidden');
+    return;
+  }
+  noBets.classList.add('hidden');
+  bets.forEach(b => {
+    const tr = document.createElement('tr');
+    let line = '—';
+    if (b.price) {
+      line = b.side === 'under' ? b.price.bid : b.price.offer;
+    } else if (b.requestedPrice) {
+      line = `~${b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer} (requested)`;
+    }
+    const payout = b.payout == null ? '—' : ('$' + b.payout);
+    tr.innerHTML = `
+      <td>${escapeHtml(b.playerName)}</td>
+      <td>${b.side === 'under' ? 'Under (hit bid)' : 'Over (lift offer)'}</td>
+      <td>${line}</td>
+      <td>$${b.stake}</td>
+      <td><span class="badge ${b.status}">${b.status}</span></td>
+      <td>${payout}</td>
+      <td>${new Date(b.timestamp).toLocaleString()}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+loadPlayers();
+setInterval(loadPlayers, 5000);
+const savedName = localStorage.getItem('bettorName');
+if (savedName) {
+  document.getElementById('myName').value = savedName;
+  loadMyBets();
+}
+</script>
+</body>
+</html>
