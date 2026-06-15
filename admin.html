@@ -43,13 +43,31 @@
       <button class="btn" onclick="setPasscode()">Save passcode</button>
       <button class="btn secondary" onclick="clearPasscode()">Remove passcode</button>
     </div>
+    <div class="form-row" style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
+      <div>
+        <div style="font-size:12px; color:var(--grey); margin-bottom:4px; font-weight:600;">AUTO-COUNTER ALGORITHM</div>
+        <div class="small" style="margin-bottom:8px;">
+          When countering an oversized bet, the suggested market adjusts for trade size and net exposure.
+          Shading sensitivity: how many dollars of one-sided exposure per point of market shade. Cap: max total points moved.
+        </div>
+      </div>
+      <div>
+        <label>Shading sensitivity ($ per point)</label>
+        <input id="shadingDollarsPerPoint" type="number" min="1" step="1" style="width:120px;" />
+      </div>
+      <div>
+        <label>Auto-move cap (points)</label>
+        <input id="autoMoveCap" type="number" min="1" step="1" style="width:100px;" />
+      </div>
+      <button class="btn secondary" onclick="saveAlgoSettings()">Save algo settings</button>
+    </div>
   </div>
 
   <div class="section-title">Eligible Bettors</div>
   <div class="card">
     <p class="small">
-      Names added here show up as a dropdown on the bettor view, so everyone bets under one consistent
-      name (e.g. avoid "Matt" vs "Matthew"). Optionally set a PIN so only that person can view their bet history.
+      Names added here show up as a dropdown on the bettor view. Optionally set a PIN so only that person can view their bet history.
+      PINs are shown below so you can distribute them.
     </p>
     <div class="form-row">
       <div style="flex:1;">
@@ -82,8 +100,8 @@
   <div class="card small" style="margin-bottom:8px;">
     "Net if low" / "Net if high" show your P&amp;L on open bets if the score lands below every bid (under bets win)
     or above every offer (over bets win). Positive = you keep money, negative = you pay out more than you hold.
-    Totals assume every market lands at that same extreme at once — a rough worst case, not a real simulation.
   </div>
+  <div id="exposureSummary" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;"></div>
   <div class="card" style="overflow-x:auto;">
     <table>
       <thead>
@@ -160,8 +178,24 @@
     </table>
   </div>
 
+  <div class="section-title">Live Market Runs</div>
+  <div class="card">
+    <p class="small">Copy and paste into an email to share current markets with bettors. Updates live as markets change.</p>
+    <div id="marketRunsTable" style="font-family:monospace; font-size:13px; white-space:pre; background:#f8f8f8; border-radius:6px; padding:12px 16px; margin-bottom:10px; overflow-x:auto; line-height:1.7;"></div>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <button class="btn secondary" onclick="copyMarketRuns()">📋 Copy to clipboard</button>
+      <span id="copyConfirm" class="small hidden" style="color:var(--green);">✓ Copied!</span>
+    </div>
+  </div>
+
   <div class="section-title">All Bets</div>
   <div class="card" style="overflow-x:auto;">
+    <div style="margin-bottom:10px;">
+      <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; width:fit-content;">
+        <input type="checkbox" id="groupByPlayer" onchange="loadBets()" />
+        Group by player
+      </label>
+    </div>
     <table>
       <thead>
         <tr><th>Player</th><th>Bettor</th><th>Side</th><th>Line</th><th>Stake</th><th>Status</th><th>Payout</th><th>When</th><th>Actions</th></tr>
@@ -171,6 +205,7 @@
   </div>
 </main>
 
+<!-- Login modal -->
 <div id="loginBackdrop" class="modal-backdrop hidden">
   <div class="modal">
     <h3>Admin passcode required</h3>
@@ -187,11 +222,32 @@
   </div>
 </div>
 
+<!-- PIN modal -->
+<div id="pinModal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3 id="pinModalTitle">Set PIN</h3>
+    <p class="small" id="pinModalDesc"></p>
+    <div class="form-row">
+      <div style="flex:1;">
+        <label>PIN (leave blank to remove)</label>
+        <input id="pinModalInput" type="text" inputmode="numeric" placeholder="e.g. 1234" />
+      </div>
+    </div>
+    <div class="form-row" style="justify-content:flex-end;">
+      <button class="btn secondary" onclick="closePinModal()">Cancel</button>
+      <button class="btn" onclick="submitPinModal()">Save PIN</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
 
 <script>
 let adminPasscode = localStorage.getItem('adminPasscode') || '';
 let players = [];
+let pendingBets = [];
+let currentSettings = { standardSize: 10, moveIncrement: 1, shadingDollarsPerPoint: 50, autoMoveCap: 5 };
+let exposureByPlayer = {};
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -242,8 +298,11 @@ async function adminFetch(url, opts = {}) {
 async function loadSettings() {
   const res = await fetch('/api/settings');
   const s = await res.json();
+  currentSettings = s;
   document.getElementById('standardSize').value = s.standardSize;
   document.getElementById('moveIncrement').value = s.moveIncrement;
+  document.getElementById('shadingDollarsPerPoint').value = s.shadingDollarsPerPoint ?? 50;
+  document.getElementById('autoMoveCap').value = s.autoMoveCap ?? 5;
   document.getElementById('passcodeStatus').textContent = s.passcodeSet ? '(currently set)' : '(not set)';
   document.getElementById('noPasscodeBanner').classList.toggle('hidden', !!s.passcodeSet);
 }
@@ -257,6 +316,19 @@ async function saveSettings() {
     body: JSON.stringify({ standardSize, moveIncrement })
   });
   showToast('Default size & increment saved.');
+  await loadSettings();
+}
+
+async function saveAlgoSettings() {
+  const shadingDollarsPerPoint = Number(document.getElementById('shadingDollarsPerPoint').value);
+  const autoMoveCap = Number(document.getElementById('autoMoveCap').value);
+  if (!shadingDollarsPerPoint || !autoMoveCap) { showToast('Enter valid values for both fields.'); return; }
+  await adminFetch('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shadingDollarsPerPoint, autoMoveCap })
+  });
+  showToast('Algo settings saved.');
   await loadSettings();
 }
 
@@ -304,12 +376,15 @@ async function loadBettors() {
   bettors.forEach(b => {
     const chip = document.createElement('div');
     chip.style.cssText = 'display:flex; align-items:center; gap:6px; background:#f3f4f6; border-radius:999px; padding:4px 6px 4px 12px; font-size:13px;';
-    chip.innerHTML = `<span>${escapeHtml(b.name)}</span><span class="small" style="color:${b.hasPin ? 'var(--green)' : '#9ca3af'};">${b.hasPin ? '🔒 PIN set' : 'no PIN'}</span>`;
+    const pinDisplay = b.pin
+      ? `<span class="small" style="color:var(--green); font-family:monospace;">🔒 ${escapeHtml(b.pin)}</span>`
+      : `<span class="small" style="color:#9ca3af;">no PIN</span>`;
+    chip.innerHTML = `<span>${escapeHtml(b.name)}</span>${pinDisplay}`;
     const pinBtn = document.createElement('button');
     pinBtn.className = 'btn secondary';
     pinBtn.style.cssText = 'padding:2px 8px; font-size:11px; border-radius:999px;';
-    pinBtn.textContent = b.hasPin ? 'Change PIN' : 'Set PIN';
-    pinBtn.onclick = () => setBettorPin(b.name, b.hasPin);
+    pinBtn.textContent = b.pin ? 'Change PIN' : 'Set PIN';
+    pinBtn.onclick = () => openPinModal(b.name, !!b.pin);
     chip.appendChild(pinBtn);
     const removeBtn = document.createElement('button');
     removeBtn.className = 'btn danger';
@@ -340,19 +415,37 @@ async function addBettor() {
   await loadBettors();
 }
 
-async function setBettorPin(name, hasPin) {
-  const promptText = hasPin
+// ---------- PIN modal ----------
+
+let pinModalTarget = null;
+
+function openPinModal(name, hasPin) {
+  pinModalTarget = name;
+  document.getElementById('pinModalTitle').textContent = hasPin ? 'Change PIN' : 'Set PIN';
+  document.getElementById('pinModalDesc').textContent = hasPin
     ? `Enter a new PIN for "${name}" (leave blank to remove the PIN):`
     : `Set a PIN for "${name}" so only they can view their bets (leave blank for no PIN):`;
-  const val = prompt(promptText);
-  if (val === null) return;
+  document.getElementById('pinModalInput').value = '';
+  document.getElementById('pinModal').classList.remove('hidden');
+  setTimeout(() => document.getElementById('pinModalInput').focus(), 50);
+}
+
+function closePinModal() {
+  document.getElementById('pinModal').classList.add('hidden');
+  pinModalTarget = null;
+}
+
+async function submitPinModal() {
+  const val = document.getElementById('pinModalInput').value.trim();
+  const name = pinModalTarget;
   const res = await adminFetch(`/api/bettors/${encodeURIComponent(name)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pin: val.trim() })
+    body: JSON.stringify({ pin: val })
   });
   if (!res.ok) { showToast('Could not update PIN.'); return; }
-  showToast(val.trim() ? `PIN set for ${name}.` : `PIN removed for ${name}.`);
+  closePinModal();
+  showToast(val ? `PIN updated for ${name}.` : `PIN removed for ${name}.`);
   await loadBettors();
 }
 
@@ -411,6 +504,7 @@ async function loadPlayers() {
   const res = await adminFetch('/api/admin/players');
   players = await res.json();
   renderPlayers();
+  renderMarketRuns();
 }
 
 function renderPlayers() {
@@ -554,24 +648,53 @@ async function deletePlayer(playerId) {
 
 // ---------- pending requests ----------
 
+function calcCounterMarket(b) {
+  const player = players.find(p => p.id === b.playerId);
+  const stdSize = (player && player.standardSize) || currentSettings.standardSize || 10;
+  const incr = (player && player.moveIncrement != null) ? player.moveIncrement : (currentSettings.moveIncrement || 1);
+  const currentBid = player ? player.bid : (b.requestedPrice ? b.requestedPrice.bid : 0);
+  const currentOffer = player ? player.offer : (b.requestedPrice ? b.requestedPrice.offer : 0);
+
+  // Trade size scaling: each standard size increment = 1 move increment
+  const tradeMovePoints = incr * Math.ceil(b.stake / stdSize);
+
+  // Exposure shading: positive netOverExposure (more overs accepted) = shade up
+  const exp = exposureByPlayer[b.playerName] || { overStakes: 0, underStakes: 0 };
+  const netOverExposure = (exp.overStakes || 0) - (exp.underStakes || 0);
+  const shadingPoints = Math.round(netOverExposure / (currentSettings.shadingDollarsPerPoint || 50));
+
+  // Combined, directional, capped
+  const autoMoveCap = currentSettings.autoMoveCap || 5;
+  const rawMove = tradeMovePoints + shadingPoints;
+  const cappedMove = Math.max(-autoMoveCap, Math.min(autoMoveCap, rawMove));
+
+  // Direction: over bet = move market up (harder to take), under bet = move market down
+  const direction = b.side === 'over' ? 1 : -1;
+  const move = cappedMove * direction;
+
+  // Round to nearest 0.5
+  const r = v => Math.round(v * 2) / 2;
+  return { bid: r(currentBid + move), offer: r(currentOffer + move) };
+}
+
 async function loadPending() {
   const res = await adminFetch('/api/admin/pending');
-  const pending = await res.json();
+  pendingBets = await res.json();
   const body = document.getElementById('pendingBody');
   const badge = document.getElementById('pendingBadge');
   const noPending = document.getElementById('noPending');
   body.innerHTML = '';
 
-  if (pending.length === 0) {
+  if (pendingBets.length === 0) {
     badge.classList.add('hidden');
     noPending.classList.remove('hidden');
     return;
   }
-  badge.textContent = pending.length;
+  badge.textContent = pendingBets.length;
   badge.classList.remove('hidden');
   noPending.classList.add('hidden');
 
-  pending.forEach(b => {
+  pendingBets.forEach(b => {
     const player = players.find(p => p.id === b.playerId);
     const requested = b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer;
     const current = player ? (b.side === 'under' ? player.bid : player.offer) : '?';
@@ -587,10 +710,68 @@ async function loadPending() {
       <td>
         <button class="btn secondary" onclick="acceptBet('${b.id}')">Accept @ ${current}</button>
         <button class="btn danger" onclick="declineBet('${b.id}')">Decline</button>
+        <button class="btn secondary" onclick="showCounter('${b.id}')" style="background:#fef3c7; color:#92400e; border-color:#f59e0b;">Counter</button>
       </td>
     `;
     body.appendChild(tr);
+
+    // Inline counter form row (hidden by default)
+    const counterRow = document.createElement('tr');
+    counterRow.id = `counter-form-${b.id}`;
+    counterRow.className = 'hidden';
+    counterRow.innerHTML = `
+      <td colspan="8" style="background:#fffbeb; padding:10px 12px;">
+        <div style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
+          <span style="font-size:12px; color:#92400e; font-weight:600; align-self:center;">Counter market:</span>
+          <div style="display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--grey);">
+            New Bid
+            <input id="counter-bid-${b.id}" type="number" step="0.5" style="width:80px; font-weight:600;" />
+          </div>
+          <div style="display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--grey);">
+            New Offer
+            <input id="counter-offer-${b.id}" type="number" step="0.5" style="width:80px; font-weight:600;" />
+          </div>
+          <div style="font-size:11px; color:var(--grey); align-self:center;">
+            (algo-suggested — edit freely)
+          </div>
+          <button class="btn" style="background:#92400e;" onclick="sendCounter('${b.id}')">Send Counter</button>
+          <button class="btn secondary" onclick="hideCounter('${b.id}')">Cancel</button>
+        </div>
+      </td>
+    `;
+    body.appendChild(counterRow);
   });
+}
+
+function showCounter(betId) {
+  const b = pendingBets.find(x => x.id === betId);
+  if (!b) return;
+  const { bid, offer } = calcCounterMarket(b);
+  document.getElementById(`counter-bid-${betId}`).value = bid;
+  document.getElementById(`counter-offer-${betId}`).value = offer;
+  document.getElementById(`counter-form-${betId}`).classList.remove('hidden');
+}
+
+function hideCounter(betId) {
+  document.getElementById(`counter-form-${betId}`).classList.add('hidden');
+}
+
+async function sendCounter(betId) {
+  const newBid = Number(document.getElementById(`counter-bid-${betId}`).value);
+  const newOffer = Number(document.getElementById(`counter-offer-${betId}`).value);
+  if (newOffer < newBid) { showToast('Offer must be ≥ bid.'); return; }
+  const res = await adminFetch(`/api/bets/${betId}/counter`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newBid, newOffer })
+  });
+  if (!res.ok) {
+    const data = await res.json();
+    showToast(data.error || 'Counter failed.');
+    return;
+  }
+  showToast('Counter sent — bettor will see Accept/Decline options.');
+  await loadAll();
 }
 
 async function acceptBet(betId) {
@@ -627,6 +808,11 @@ async function loadExposure() {
   const body = document.getElementById('exposureBody');
   const foot = document.getElementById('exposureFoot');
   body.innerHTML = '';
+
+  // Build per-player exposure lookup for counter algo
+  exposureByPlayer = {};
+  data.rows.forEach(r => { exposureByPlayer[r.name] = r; });
+
   data.rows.forEach(r => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
@@ -639,11 +825,16 @@ async function loadExposure() {
     `;
     body.appendChild(tr);
   });
+
+  const summaryEl = document.getElementById('exposureSummary');
+
   if (data.rows.length === 0) {
     body.innerHTML = '<tr><td colspan="6" class="small">No open markets with bets yet.</td></tr>';
     foot.innerHTML = '';
+    summaryEl.innerHTML = '';
     return;
   }
+
   const t = data.totals;
   foot.innerHTML = `
     <tr style="font-weight:600;">
@@ -655,6 +846,52 @@ async function loadExposure() {
       <td class="exposure-net ${t.netIfHigh >= 0 ? 'positive' : 'negative'}">$${t.netIfHigh}</td>
     </tr>
   `;
+
+  // Summary cards
+  const cardStyle = (val) => `flex:1; min-width:130px; border-radius:8px; padding:12px 16px; background:${val >= 0 ? 'var(--green-bg)' : 'var(--red-bg)'};`;
+  const valStyle = (val) => `font-size:24px; font-weight:700; color:${val >= 0 ? 'var(--green)' : 'var(--red)'};`;
+  summaryEl.innerHTML = `
+    <div style="flex:1; min-width:130px; border-radius:8px; padding:12px 16px; background:#f3f4f6;">
+      <div class="small">Stakes held</div>
+      <div style="font-size:24px; font-weight:700;">$${t.stakesHeld}</div>
+    </div>
+    <div style="${cardStyle(t.netIfLow)}">
+      <div class="small">Worst case (all low)</div>
+      <div style="${valStyle(t.netIfLow)}">$${t.netIfLow}</div>
+    </div>
+    <div style="${cardStyle(t.netIfHigh)}">
+      <div class="small">Worst case (all high)</div>
+      <div style="${valStyle(t.netIfHigh)}">$${t.netIfHigh}</div>
+    </div>
+  `;
+}
+
+// ---------- live market runs ----------
+
+function renderMarketRuns() {
+  const el = document.getElementById('marketRunsTable');
+  const open = players.filter(p => p.status === 'open' || p.status === 'paused');
+  if (open.length === 0) {
+    el.textContent = '(No open markets yet)';
+    return;
+  }
+  const maxLen = Math.max(...open.map(p => p.name.length));
+  const lines = open.map(p => `${p.name.padEnd(maxLen + 2)} ${p.bid} / ${p.offer}`);
+  lines.push('');
+  lines.push('Bet here: https://bowling-markets.onrender.com/');
+  el.textContent = lines.join('\n');
+}
+
+async function copyMarketRuns() {
+  const text = document.getElementById('marketRunsTable').textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    const confirm = document.getElementById('copyConfirm');
+    confirm.classList.remove('hidden');
+    setTimeout(() => confirm.classList.add('hidden'), 2000);
+  } catch (e) {
+    showToast('Could not copy — try selecting and copying manually.');
+  }
 }
 
 // ---------- bets ----------
@@ -663,32 +900,55 @@ async function loadBets() {
   const res = await adminFetch('/api/admin/bets');
   const bets = await res.json();
   const body = document.getElementById('betsBody');
+  const groupBy = document.getElementById('groupByPlayer') && document.getElementById('groupByPlayer').checked;
   body.innerHTML = '';
-  bets.forEach(b => {
-    const tr = document.createElement('tr');
-    let line = '—';
-    if (b.price) {
-      line = b.side === 'under' ? b.price.bid : b.price.offer;
-    } else if (b.requestedPrice) {
-      line = `~${b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer}`;
-    }
-    const payout = b.payout == null ? '—' : ('$' + b.payout);
-    const action = b.status === 'open'
-      ? `<button class="btn danger" onclick="cancelBet('${b.id}')">Cancel</button>`
-      : '';
-    tr.innerHTML = `
-      <td>${escapeHtml(b.playerName)}</td>
-      <td>${escapeHtml(b.bettorName)}</td>
-      <td>${b.side === 'under' ? 'Under (hit bid)' : 'Over (lift offer)'}</td>
-      <td>${line}</td>
-      <td>$${b.stake}</td>
-      <td><span class="badge ${b.status}">${b.status}</span></td>
-      <td>${payout}</td>
-      <td>${new Date(b.timestamp).toLocaleString()}</td>
-      <td>${action}</td>
-    `;
-    body.appendChild(tr);
-  });
+
+  if (groupBy) {
+    const byPlayer = {};
+    const order = [];
+    bets.forEach(b => {
+      if (!byPlayer[b.playerName]) { byPlayer[b.playerName] = []; order.push(b.playerName); }
+      byPlayer[b.playerName].push(b);
+    });
+    order.forEach(playerName => {
+      const playerBets = byPlayer[playerName];
+      const headerTr = document.createElement('tr');
+      headerTr.style.background = '#f8f8f8';
+      headerTr.innerHTML = `<td colspan="9" style="font-weight:700; padding:10px 6px 4px; font-size:13px;">${escapeHtml(playerName)} <span class="small">(${playerBets.length} bet${playerBets.length !== 1 ? 's' : ''})</span></td>`;
+      body.appendChild(headerTr);
+      playerBets.forEach(b => renderBetRow(body, b));
+    });
+  } else {
+    bets.forEach(b => renderBetRow(body, b));
+  }
+}
+
+function renderBetRow(body, b) {
+  const tr = document.createElement('tr');
+  let line = '—';
+  if (b.status === 'countered' && b.counterPrice) {
+    line = `${b.side === 'under' ? b.counterPrice.bid : b.counterPrice.offer} <em style="color:#92400e; font-size:11px;">counter</em>`;
+  } else if (b.price) {
+    line = b.side === 'under' ? b.price.bid : b.price.offer;
+  } else if (b.requestedPrice) {
+    line = `~${b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer}`;
+  }
+  const payout = b.payout == null ? '—' : ('$' + b.payout);
+  const action = b.status === 'open'
+    ? `<button class="btn danger" onclick="cancelBet('${b.id}')">Cancel</button>`
+    : '';
+  tr.innerHTML = `
+    <td>${escapeHtml(b.playerName)}</td>
+    <td>${escapeHtml(b.bettorName)}</td>
+    <td>${b.side === 'under' ? 'Under (hit bid)' : 'Over (lift offer)'}</td>
+    <td>${line}</td>
+    <td>$${b.stake}</td>
+    <td><span class="badge ${b.status}">${b.status}</span></td>
+    <td>${payout}</td>
+    <td>${new Date(b.timestamp).toLocaleString()}</td>
+    <td>${action}</td>
+  `;
+  body.appendChild(tr);
 }
 
 // ---------- bootstrap ----------

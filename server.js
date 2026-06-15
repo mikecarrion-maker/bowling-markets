@@ -32,9 +32,11 @@ app.get('/style.css', (req, res) => {
 function defaultData() {
   return {
     settings: {
-      standardSize: 10,   // default $ size on each side of a fresh/reset market (a "10x10" market)
-      moveIncrement: 1,   // default points the bid & offer shift when a side is exhausted
-      adminPasscode: ''   // '' = no passcode set yet, /admin is open
+      standardSize: 10,           // default $ size on each side of a fresh/reset market
+      moveIncrement: 1,           // default points the bid & offer shift when a side is exhausted
+      adminPasscode: '',          // '' = no passcode set yet, /admin is open
+      shadingDollarsPerPoint: 50, // $X of net imbalance per player = 1 point of exposure shading
+      autoMoveCap: 5              // max points the counter-offer algorithm will suggest in one shot
     },
     players: [],
     bets: [],
@@ -49,6 +51,9 @@ function normalize(data) {
   if (!Array.isArray(data.players)) data.players = [];
   if (!Array.isArray(data.bets)) data.bets = [];
   if (!data.settings) data.settings = defaultData().settings;
+  // Forward-fill any new settings keys that may not exist in older stored data
+  const defaults = defaultData().settings;
+  Object.keys(defaults).forEach(k => { if (data.settings[k] === undefined) data.settings[k] = defaults[k]; });
   return data;
 }
 
@@ -212,10 +217,12 @@ app.get('/api/settings', async (req, res) => {
 
 app.put('/api/settings', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const { standardSize, moveIncrement, adminPasscode } = req.body;
+  const { standardSize, moveIncrement, adminPasscode, shadingDollarsPerPoint, autoMoveCap } = req.body;
   if (standardSize != null) data.settings.standardSize = Number(standardSize);
   if (moveIncrement != null) data.settings.moveIncrement = Number(moveIncrement);
   if (adminPasscode !== undefined) data.settings.adminPasscode = String(adminPasscode || '');
+  if (shadingDollarsPerPoint != null) data.settings.shadingDollarsPerPoint = Math.max(1, Number(shadingDollarsPerPoint));
+  if (autoMoveCap != null) data.settings.autoMoveCap = Math.max(1, Number(autoMoveCap));
   await saveData(data);
   const { adminPasscode: _omit, ...rest } = data.settings;
   res.json({ ...rest, passcodeSet: !!data.settings.adminPasscode });
@@ -229,7 +236,7 @@ function sortedBettorNames(data) {
 
 function adminBettorList(data) {
   return data.bettors
-    .map(b => ({ name: b.name, hasPin: !!b.pin }))
+    .map(b => ({ name: b.name, pin: b.pin || '' }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -392,8 +399,8 @@ app.post('/api/players/:id/settle', requireAdmin, async (req, res) => {
   let declinedPending = 0;
   data.bets.forEach(b => {
     if (b.playerId !== player.id) return;
-    if (b.status === 'pending') {
-      // can't honor unaccepted requests once the market is settled
+    if (b.status === 'pending' || b.status === 'countered') {
+      // can't honor unaccepted/unanswered requests once the market is settled
       b.status = 'declined';
       b.payout = 0;
       declinedPending++;
@@ -604,6 +611,78 @@ app.post('/api/bets/:id/decline', requireAdmin, async (req, res) => {
   if (bet.status !== 'pending') return res.status(400).json({ error: 'bet is not pending' });
   bet.status = 'declined';
   bet.payout = 0;
+  await saveData(data);
+  res.json({ bet });
+});
+
+// Counter a pending bet: market maker sets a new market for the player, which goes
+// live immediately. The bet flips to "countered" and waits for the bettor to accept/decline.
+app.post('/api/bets/:id/counter', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const bet = data.bets.find(b => b.id === req.params.id);
+  if (!bet) return res.status(404).json({ error: 'bet not found' });
+  if (bet.status !== 'pending') return res.status(400).json({ error: 'bet is not pending' });
+  const player = data.players.find(p => p.id === bet.playerId);
+  if (!player) return res.status(404).json({ error: 'player not found' });
+  if (player.status !== 'open') return res.status(400).json({ error: 'market is not open' });
+
+  const newBid = Number(req.body.newBid);
+  const newOffer = Number(req.body.newOffer);
+  if (isNaN(newBid) || isNaN(newOffer)) return res.status(400).json({ error: 'newBid and newOffer are required' });
+  if (newOffer < newBid) return res.status(400).json({ error: 'offer must be >= bid' });
+
+  // Update the player's market live for everyone to see.
+  player.bid = newBid;
+  player.offer = newOffer;
+
+  // Capture the counter price on the bet and flip its status.
+  bet.counterPrice = { bid: newBid, offer: newOffer };
+  bet.status = 'countered';
+
+  await saveData(data);
+  res.json({ bet, player });
+});
+
+// Bettor accepts a countered bet: confirmed at the counter price.
+app.post('/api/bets/:id/accept-counter', async (req, res) => {
+  const data = await loadData();
+  const bet = data.bets.find(b => b.id === req.params.id);
+  if (!bet) return res.status(404).json({ error: 'bet not found' });
+  if (bet.status !== 'countered') return res.status(400).json({ error: 'bet is not countered' });
+
+  const bettor = data.bettors.find(b => b.name.toLowerCase() === bet.bettorName.toLowerCase());
+  if (bettor && bettor.pin) {
+    const providedPin = req.body.pin == null ? '' : String(req.body.pin);
+    if (providedPin !== bettor.pin) return res.status(401).json({ error: 'incorrect pin' });
+  }
+
+  const player = data.players.find(p => p.id === bet.playerId);
+  if (!player) return res.status(404).json({ error: 'player not found' });
+
+  bet.price = bet.counterPrice;
+  bet.status = 'open';
+  fillBet(player, bet.side, bet.stake, data.settings);
+
+  await saveData(data);
+  res.json({ bet, player });
+});
+
+// Bettor declines a countered bet: no action, stake returned.
+app.post('/api/bets/:id/decline-counter', async (req, res) => {
+  const data = await loadData();
+  const bet = data.bets.find(b => b.id === req.params.id);
+  if (!bet) return res.status(404).json({ error: 'bet not found' });
+  if (bet.status !== 'countered') return res.status(400).json({ error: 'bet is not countered' });
+
+  const bettor = data.bettors.find(b => b.name.toLowerCase() === bet.bettorName.toLowerCase());
+  if (bettor && bettor.pin) {
+    const providedPin = req.body.pin == null ? '' : String(req.body.pin);
+    if (providedPin !== bettor.pin) return res.status(401).json({ error: 'incorrect pin' });
+  }
+
+  bet.status = 'declined';
+  bet.payout = 0;
+
   await saveData(data);
   res.json({ bet });
 });

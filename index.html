@@ -18,7 +18,7 @@
     next to it (how much can be bet at that price right now).
     <span style="color:var(--red); font-weight:600;">Hit the bid</span> if you think the player will score
     <em>below</em> the bid. <span style="color:var(--green); font-weight:600;">Lift the offer</span> if you think
-    they'll score <em>above</em> the offer. Score lands between the two? It's a push &mdash; stake back, no win/loss.
+    they'll score <em>above</em> the offer.
     If your stake is bigger than the size shown, your bet goes to the market maker for approval before it's confirmed.
   </div>
 
@@ -39,7 +39,7 @@
     </div>
     <table id="betsTable">
       <thead>
-        <tr><th>Player</th><th>Side</th><th>Line</th><th>Stake</th><th>Status</th><th>Payout</th><th>When</th></tr>
+        <tr><th>Player</th><th>Side</th><th>Line</th><th>Stake</th><th>Status</th><th>Payout</th><th>When</th><th></th></tr>
       </thead>
       <tbody id="betsBody"></tbody>
     </table>
@@ -231,23 +231,53 @@ async function loadMyBets(opts = {}) {
   bets.forEach(b => {
     const tr = document.createElement('tr');
     let line = '—';
-    if (b.price) {
+    if (b.status === 'countered' && b.counterPrice) {
+      line = `${b.side === 'under' ? b.counterPrice.bid : b.counterPrice.offer} <em style="color:var(--amber);font-size:11px;">counter</em>`;
+    } else if (b.price) {
       line = b.side === 'under' ? b.price.bid : b.price.offer;
     } else if (b.requestedPrice) {
-      line = `~${b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer} (requested)`;
+      line = `~${b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer} <em style="font-size:11px;">req.</em>`;
     }
     const payout = b.payout == null ? '—' : ('$' + b.payout);
+    let actionCell = '';
+    if (b.status === 'countered') {
+      actionCell = `
+        <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="answerCounter('${b.id}', 'accept')">Accept</button>
+        <button class="btn danger" style="padding:3px 10px;font-size:12px;margin-left:4px;" onclick="answerCounter('${b.id}', 'decline')">Decline</button>
+      `;
+    }
     tr.innerHTML = `
       <td>${escapeHtml(b.playerName)}</td>
-      <td>${b.side === 'under' ? 'Under (hit bid)' : 'Over (lift offer)'}</td>
+      <td>${b.side === 'under' ? 'Under' : 'Over'}</td>
       <td>${line}</td>
       <td>$${b.stake}</td>
       <td><span class="badge ${b.status}">${b.status}</span></td>
       <td>${payout}</td>
-      <td>${new Date(b.timestamp).toLocaleString()}</td>
+      <td style="font-size:11px;">${new Date(b.timestamp).toLocaleString()}</td>
+      <td>${actionCell}</td>
     `;
     body.appendChild(tr);
   });
+}
+
+async function answerCounter(betId, action) {
+  const pin = document.getElementById('myPin').value.trim();
+  const endpoint = action === 'accept' ? 'accept-counter' : 'decline-counter';
+  const res = await fetch(`/api/bets/${betId}/${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pin })
+  });
+  if (res.status === 401) {
+    document.getElementById('betsError').textContent = 'Incorrect PIN.';
+    document.getElementById('betsError').classList.remove('hidden');
+    return;
+  }
+  const data = await res.json();
+  if (!res.ok) { showToast(data.error || 'Something went wrong.'); return; }
+  showToast(action === 'accept' ? 'Counter accepted — bet is now open!' : 'Counter declined.');
+  await loadMyBets();
+  await loadPlayers();
 }
 
 (async () => {

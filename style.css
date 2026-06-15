@@ -128,6 +128,7 @@ main {
 .badge.push { background: #f3f4f6; color: var(--grey); }
 .badge.closed { background: #f3f4f6; color: var(--grey); }
 .badge.pending { background: #fff4e0; color: #b45309; }
+.badge.countered { background: #fef3c7; color: #92400e; font-weight: 600; }
 .badge.paused { background: #fff4e0; color: #b45309; }
 .badge.declined { background: #f3f4f6; color: var(--grey); }
 .badge.cancelled { background: #f3f4f6; color: var(--grey); }
