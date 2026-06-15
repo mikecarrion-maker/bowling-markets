@@ -89,7 +89,7 @@
   <div class="card" style="overflow-x:auto;">
     <table>
       <thead>
-        <tr><th>Player</th><th>Bettor</th><th>Side</th><th>Stake</th><th>Requested @</th><th>Current market</th><th>When</th><th>Actions</th></tr>
+        <tr><th>Player</th><th>Bettor</th><th>Bet</th><th>Stake</th><th>Current market</th><th>When</th><th>Actions</th></tr>
       </thead>
       <tbody id="pendingBody"></tbody>
     </table>
@@ -248,6 +248,7 @@ let players = [];
 let pendingBets = [];
 let currentSettings = { standardSize: 10, moveIncrement: 1, shadingDollarsPerPoint: 50, autoMoveCap: 5 };
 let exposureByPlayer = {};
+let openCounterBetId = null;
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -655,24 +656,25 @@ function calcCounterMarket(b) {
   const currentBid = player ? player.bid : (b.requestedPrice ? b.requestedPrice.bid : 0);
   const currentOffer = player ? player.offer : (b.requestedPrice ? b.requestedPrice.offer : 0);
 
-  // Trade size scaling: each standard size increment = 1 move increment
+  // Trade size scaling: magnitude × direction.
+  // Under bet (hit bid) → lower the bid to make unders harder (direction = -1).
+  // Over bet (lift offer) → raise the offer to make overs harder (direction = +1).
   const tradeMovePoints = incr * Math.ceil(b.stake / stdSize);
+  const tradeDirection = b.side === 'over' ? 1 : -1;
+  const tradeComponent = tradeMovePoints * tradeDirection;
 
-  // Exposure shading: positive netOverExposure (more overs accepted) = shade up
+  // Exposure shading: already directional — positive = shade up, negative = shade down.
+  // More unders accepted → net long → shade DOWN to discourage more unders.
+  // More overs accepted  → net short → shade UP to discourage more overs.
   const exp = exposureByPlayer[b.playerName] || { overStakes: 0, underStakes: 0 };
   const netOverExposure = (exp.overStakes || 0) - (exp.underStakes || 0);
-  const shadingPoints = Math.round(netOverExposure / (currentSettings.shadingDollarsPerPoint || 50));
+  const shadingComponent = Math.round(netOverExposure / (currentSettings.shadingDollarsPerPoint || 50));
 
-  // Combined, directional, capped
+  // Combine, then cap. Both components are signed — no second direction multiply.
   const autoMoveCap = currentSettings.autoMoveCap || 5;
-  const rawMove = tradeMovePoints + shadingPoints;
-  const cappedMove = Math.max(-autoMoveCap, Math.min(autoMoveCap, rawMove));
+  const totalMove = tradeComponent + shadingComponent;
+  const move = Math.max(-autoMoveCap, Math.min(autoMoveCap, totalMove));
 
-  // Direction: over bet = move market up (harder to take), under bet = move market down
-  const direction = b.side === 'over' ? 1 : -1;
-  const move = cappedMove * direction;
-
-  // Round to nearest 0.5
   const r = v => Math.round(v * 2) / 2;
   return { bid: r(currentBid + move), offer: r(currentOffer + move) };
 }
@@ -696,43 +698,57 @@ async function loadPending() {
 
   pendingBets.forEach(b => {
     const player = players.find(p => p.id === b.playerId);
-    const requested = b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer;
-    const current = player ? (b.side === 'under' ? player.bid : player.offer) : '?';
+    const isUnder = b.side === 'under';
+    const requestedLevel = isUnder ? b.requestedPrice.bid : b.requestedPrice.offer;
+    const currentBid = player ? player.bid : '?';
+    const currentOffer = player ? player.offer : '?';
+
+    // Highlight the relevant side of the current market
+    const marketDisplay = isUnder
+      ? `<span style="color:var(--red);font-weight:700;">${currentBid}</span> / ${currentOffer}`
+      : `${currentBid} / <span style="color:var(--green);font-weight:700;">${currentOffer}</span>`;
+
+    // Bold colored bet summary
+    const betDisplay = isUnder
+      ? `<span style="color:var(--red);font-weight:700;font-size:15px;">⬇ Under @ ${requestedLevel}</span><div class="small" style="margin-top:2px;">hit bid</div>`
+      : `<span style="color:var(--green);font-weight:700;font-size:15px;">⬆ Over @ ${requestedLevel}</span><div class="small" style="margin-top:2px;">lift offer</div>`;
+
+    const acceptLevel = isUnder ? currentBid : currentOffer;
+
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${escapeHtml(b.playerName)}</td>
       <td>${escapeHtml(b.bettorName)}</td>
-      <td>${b.side === 'under' ? 'Under (hit bid)' : 'Over (lift offer)'}</td>
+      <td>${betDisplay}</td>
       <td>$${b.stake}</td>
-      <td>${requested}</td>
-      <td>${current}</td>
-      <td>${new Date(b.timestamp).toLocaleString()}</td>
+      <td>${marketDisplay}</td>
+      <td style="font-size:12px;">${new Date(b.timestamp).toLocaleString()}</td>
       <td>
-        <button class="btn secondary" onclick="acceptBet('${b.id}')">Accept @ ${current}</button>
-        <button class="btn danger" onclick="declineBet('${b.id}')">Decline</button>
-        <button class="btn secondary" onclick="showCounter('${b.id}')" style="background:#fef3c7; color:#92400e; border-color:#f59e0b;">Counter</button>
+        <div style="display:flex; gap:4px; flex-wrap:wrap;">
+          <button class="btn secondary" onclick="acceptBet('${b.id}')">Accept @ ${acceptLevel}</button>
+          <button class="btn danger" onclick="declineBet('${b.id}')">Decline</button>
+          <button class="btn secondary" onclick="showCounter('${b.id}')" style="background:#fef3c7; color:#92400e; border-color:#f59e0b;">Counter</button>
+        </div>
       </td>
     `;
     body.appendChild(tr);
 
-    // Inline counter form row (hidden by default)
+    // Inline counter form — one input for the relevant side only
+    const sideLabel = isUnder ? 'Counter bid at' : 'Counter offer at';
+    const sideColor = isUnder ? 'var(--red)' : 'var(--green)';
     const counterRow = document.createElement('tr');
     counterRow.id = `counter-form-${b.id}`;
     counterRow.className = 'hidden';
     counterRow.innerHTML = `
-      <td colspan="8" style="background:#fffbeb; padding:10px 12px;">
-        <div style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
-          <span style="font-size:12px; color:#92400e; font-weight:600; align-self:center;">Counter market:</span>
-          <div style="display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--grey);">
-            New Bid
-            <input id="counter-bid-${b.id}" type="number" step="0.5" style="width:80px; font-weight:600;" />
+      <td colspan="7" style="background:#fffbeb; padding:10px 14px;">
+        <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+          <span style="font-size:12px; color:#92400e; font-weight:600;">Counter:</span>
+          <div style="display:flex; flex-direction:column; gap:3px;">
+            <label style="font-size:11px; color:${sideColor}; font-weight:700;">${sideLabel}</label>
+            <input id="counter-level-${b.id}" type="number" step="0.5" style="width:90px; font-size:16px; font-weight:700; color:${sideColor};" />
           </div>
-          <div style="display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--grey);">
-            New Offer
-            <input id="counter-offer-${b.id}" type="number" step="0.5" style="width:80px; font-weight:600;" />
-          </div>
-          <div style="font-size:11px; color:var(--grey); align-self:center;">
-            (algo-suggested — edit freely)
+          <div style="font-size:11px; color:var(--grey); align-self:center; line-height:1.5;">
+            Algo-suggested — edit freely.<br>Other side adjusts to maintain spread.
           </div>
           <button class="btn" style="background:#92400e;" onclick="sendCounter('${b.id}')">Send Counter</button>
           <button class="btn secondary" onclick="hideCounter('${b.id}')">Cancel</button>
@@ -741,25 +757,45 @@ async function loadPending() {
     `;
     body.appendChild(counterRow);
   });
+
+  // Restore counter form if one was open before the reload
+  if (openCounterBetId && pendingBets.find(b => b.id === openCounterBetId)) {
+    showCounter(openCounterBetId);
+  }
 }
 
 function showCounter(betId) {
   const b = pendingBets.find(x => x.id === betId);
   if (!b) return;
+  openCounterBetId = betId;
   const { bid, offer } = calcCounterMarket(b);
-  document.getElementById(`counter-bid-${betId}`).value = bid;
-  document.getElementById(`counter-offer-${betId}`).value = offer;
-  document.getElementById(`counter-form-${betId}`).classList.remove('hidden');
+  const level = b.side === 'under' ? bid : offer;
+  const el = document.getElementById(`counter-level-${betId}`);
+  if (el) el.value = level;
+  const formEl = document.getElementById(`counter-form-${betId}`);
+  if (formEl) formEl.classList.remove('hidden');
 }
 
 function hideCounter(betId) {
-  document.getElementById(`counter-form-${betId}`).classList.add('hidden');
+  openCounterBetId = null;
+  const formEl = document.getElementById(`counter-form-${betId}`);
+  if (formEl) formEl.classList.add('hidden');
 }
 
 async function sendCounter(betId) {
-  const newBid = Number(document.getElementById(`counter-bid-${betId}`).value);
-  const newOffer = Number(document.getElementById(`counter-offer-${betId}`).value);
-  if (newOffer < newBid) { showToast('Offer must be ≥ bid.'); return; }
+  const b = pendingBets.find(x => x.id === betId);
+  if (!b) return;
+  const level = Number(document.getElementById(`counter-level-${betId}`).value);
+  if (!level) { showToast('Enter a counter level first.'); return; }
+
+  // Maintain the current spread; compute the other side from it
+  const player = players.find(p => p.id === b.playerId);
+  const currentSpread = player ? (player.offer - player.bid) : 10;
+  const newBid = b.side === 'under' ? level : Math.round((level - currentSpread) * 2) / 2;
+  const newOffer = b.side === 'over' ? level : Math.round((level + currentSpread) * 2) / 2;
+
+  if (newOffer < newBid) { showToast('Resulting market is inverted — adjust the level.'); return; }
+
   const res = await adminFetch(`/api/bets/${betId}/counter`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -770,6 +806,7 @@ async function sendCounter(betId) {
     showToast(data.error || 'Counter failed.');
     return;
   }
+  openCounterBetId = null;
   showToast('Counter sent — bettor will see Accept/Decline options.');
   await loadAll();
 }
