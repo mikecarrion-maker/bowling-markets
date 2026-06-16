@@ -5,6 +5,46 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Market Maker Dashboard</title>
 <link rel="stylesheet" href="style.css" />
+<style>
+/* Group tabs */
+.group-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 18px;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 0;
+}
+.group-tab {
+  padding: 8px 22px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--grey);
+  border-bottom: 3px solid transparent;
+  margin-bottom: -2px;
+  border-radius: 6px 6px 0 0;
+  transition: color 0.15s;
+}
+.group-tab:hover { color: var(--text); }
+.group-tab.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+.group-tab.combined-tab.active {
+  color: #7c3aed;
+  border-bottom-color: #7c3aed;
+}
+/* Combined view cards */
+.combined-group-header {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 18px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+</style>
 </head>
 <body>
 <header>
@@ -18,6 +58,7 @@
     "Settings" below to lock this page down.
   </div>
 
+  <!-- Global settings (not group-specific) -->
   <div class="section-title">Settings</div>
   <div class="card">
     <p class="small">
@@ -61,148 +102,180 @@
       </div>
       <button class="btn secondary" onclick="saveAlgoSettings()">Save algo settings</button>
     </div>
-  </div>
-
-  <div class="section-title">Eligible Bettors</div>
-  <div class="card">
-    <p class="small">
-      Names added here show up as a dropdown on the bettor view. Optionally set a PIN so only that person can view their bet history.
-      PINs are shown below so you can distribute them.
-    </p>
-    <div class="form-row">
-      <div style="flex:1;">
-        <label>Add a name</label>
-        <input id="newBettorName" type="text" placeholder="e.g. Matthew Smith" />
+    <div class="form-row" style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
+      <div>
+        <div style="font-size:12px; color:var(--grey); margin-bottom:4px; font-weight:600;">GROUP NAMES</div>
       </div>
       <div>
-        <label>PIN (optional)</label>
-        <input id="newBettorPin" type="text" inputmode="numeric" placeholder="e.g. 1234" style="width:100px;" />
-      </div>
-      <button class="btn" onclick="addBettor()">Add</button>
-    </div>
-    <div id="bettorsList" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
-  </div>
-
-  <div class="section-title">
-    Pending Requests <span id="pendingBadge" class="notif-badge hidden">0</span>
-  </div>
-  <div class="card" style="overflow-x:auto;">
-    <table>
-      <thead>
-        <tr><th>Player</th><th>Bettor</th><th>Bet</th><th>Stake</th><th>Current market</th><th>When</th><th>Actions</th></tr>
-      </thead>
-      <tbody id="pendingBody"></tbody>
-    </table>
-    <div id="noPending" class="small">No pending requests.</div>
-  </div>
-
-  <div class="section-title">Exposure</div>
-  <div class="card small" style="margin-bottom:8px;">
-    "Net if low" / "Net if high" show your P&amp;L on open bets if the score lands below every bid (under bets win)
-    or above every offer (over bets win). Positive = you keep money, negative = you pay out more than you hold.
-  </div>
-  <div id="exposureSummary" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;"></div>
-  <div class="card" style="overflow-x:auto;">
-    <table>
-      <thead>
-        <tr><th>Player</th><th>Stakes held</th><th>Under stakes</th><th>Over stakes</th><th>Net if low</th><th>Net if high</th></tr>
-      </thead>
-      <tbody id="exposureBody"></tbody>
-      <tfoot id="exposureFoot"></tfoot>
-    </table>
-  </div>
-
-  <div class="section-title">Add Player / Market</div>
-  <div class="card">
-    <div class="form-row">
-      <div style="flex:1;">
-        <label>Player name</label>
-        <input id="newName" type="text" placeholder="e.g. Jordan Lee" />
+        <label>LA group name</label>
+        <input id="groupNameLa" type="text" style="width:160px;" placeholder="LA Bowlers" />
       </div>
       <div>
-        <label>Bid</label>
-        <input id="newBid" type="number" step="0.5" placeholder="75" />
+        <label>London group name</label>
+        <input id="groupNameLondon" type="text" style="width:160px;" placeholder="London Bowlers" />
       </div>
-      <div>
-        <label>Bid size ($)</label>
-        <input id="newBidSize" type="number" min="0" step="1" placeholder="(default)" />
-      </div>
-      <div>
-        <label>Offer</label>
-        <input id="newOffer" type="number" step="0.5" placeholder="85" />
-      </div>
-      <div>
-        <label>Offer size ($)</label>
-        <input id="newOfferSize" type="number" min="0" step="1" placeholder="(default)" />
-      </div>
-    </div>
-    <div class="form-row">
-      <div>
-        <label>Size override ($)</label>
-        <input id="newStandardSize" type="number" min="0" step="1" placeholder="(default)" />
-      </div>
-      <div>
-        <label>Increment override (pts)</label>
-        <input id="newIncrement" type="number" min="0" step="0.5" placeholder="(default)" />
-      </div>
-      <div>
-        <label>Auto-move</label>
-        <select id="newAutoMove">
-          <option value="true" selected>On</option>
-          <option value="false">Off</option>
-        </select>
-      </div>
-      <button class="btn" onclick="addPlayer()">Add player</button>
-    </div>
-    <div id="addError" class="small" style="color:var(--red);"></div>
-  </div>
-
-  <div class="section-title">Players &amp; Markets</div>
-  <div class="card" style="overflow-x:auto;">
-    <table>
-      <thead>
-        <tr>
-          <th>Player</th>
-          <th>Bid</th>
-          <th>Bid size</th>
-          <th>Offer</th>
-          <th>Offer size</th>
-          <th>Size override</th>
-          <th>Increment override</th>
-          <th>Auto</th>
-          <th>Status</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody id="playersBody"></tbody>
-    </table>
-  </div>
-
-  <div class="section-title">Live Market Runs</div>
-  <div class="card">
-    <p class="small">Copy and paste into an email to share current markets with bettors. Updates live as markets change.</p>
-    <div id="marketRunsTable" style="font-family:monospace; font-size:13px; white-space:pre; background:#f8f8f8; border-radius:6px; padding:12px 16px; margin-bottom:10px; overflow-x:auto; line-height:1.7;"></div>
-    <div style="display:flex; align-items:center; gap:10px;">
-      <button class="btn secondary" onclick="copyMarketRuns()">📋 Copy to clipboard</button>
-      <span id="copyConfirm" class="small hidden" style="color:var(--green);">✓ Copied!</span>
+      <button class="btn secondary" onclick="saveGroupNames()">Save names</button>
     </div>
   </div>
 
-  <div class="section-title">All Bets</div>
-  <div class="card" style="overflow-x:auto;">
-    <div style="margin-bottom:10px;">
-      <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; width:fit-content;">
-        <input type="checkbox" id="groupByPlayer" onchange="loadBets()" />
-        Group by player
-      </label>
-    </div>
-    <table>
-      <thead>
-        <tr><th>Player</th><th>Bettor</th><th>Side</th><th>Line</th><th>Stake</th><th>Status</th><th>Payout</th><th>When</th><th>Actions</th></tr>
-      </thead>
-      <tbody id="betsBody"></tbody>
-    </table>
+  <!-- Group tabs -->
+  <div class="group-tabs">
+    <button class="group-tab active" id="tab-la" onclick="switchGroup('la')">LA Bowlers</button>
+    <button class="group-tab" id="tab-london" onclick="switchGroup('london')">London Bowlers</button>
+    <button class="group-tab combined-tab" id="tab-combined" onclick="switchGroup('combined')">Combined</button>
   </div>
+
+  <!-- Per-group content (shown for la / london) -->
+  <div id="groupView">
+
+    <div class="section-title" id="bettorsTitle">Eligible Bettors</div>
+    <div class="card">
+      <p class="small">
+        Names added here show up as a dropdown on the bettor view. Optionally set a PIN so only that person can view their bet history.
+        PINs are shown below so you can distribute them.
+      </p>
+      <div class="form-row">
+        <div style="flex:1;">
+          <label>Add a name</label>
+          <input id="newBettorName" type="text" placeholder="e.g. Matthew Smith" />
+        </div>
+        <div>
+          <label>PIN (optional)</label>
+          <input id="newBettorPin" type="text" inputmode="numeric" placeholder="e.g. 1234" style="width:100px;" />
+        </div>
+        <button class="btn" onclick="addBettor()">Add</button>
+      </div>
+      <div id="bettorsList" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
+    </div>
+
+    <div class="section-title">
+      Pending Requests <span id="pendingBadge" class="notif-badge hidden">0</span>
+    </div>
+    <div class="card" style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr><th>Player</th><th>Bettor</th><th>Bet</th><th>Stake</th><th>Current market</th><th>When</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="pendingBody"></tbody>
+      </table>
+      <div id="noPending" class="small">No pending requests.</div>
+    </div>
+
+    <div class="section-title">Exposure</div>
+    <div class="card small" style="margin-bottom:8px;">
+      "Net if low" / "Net if high" show your P&amp;L on open bets if the score lands below every bid (under bets win)
+      or above every offer (over bets win). Positive = you keep money, negative = you pay out more than you hold.
+    </div>
+    <div id="exposureSummary" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;"></div>
+    <div class="card" style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr><th>Player</th><th>Stakes held</th><th>Under stakes</th><th>Over stakes</th><th>Net if low</th><th>Net if high</th></tr>
+        </thead>
+        <tbody id="exposureBody"></tbody>
+        <tfoot id="exposureFoot"></tfoot>
+      </table>
+    </div>
+
+    <div class="section-title">Add Player / Market</div>
+    <div class="card">
+      <div class="form-row">
+        <div style="flex:1;">
+          <label>Player name</label>
+          <input id="newName" type="text" placeholder="e.g. Jordan Lee" />
+        </div>
+        <div>
+          <label>Bid</label>
+          <input id="newBid" type="number" step="0.5" placeholder="75" />
+        </div>
+        <div>
+          <label>Bid size ($)</label>
+          <input id="newBidSize" type="number" min="0" step="1" placeholder="(default)" />
+        </div>
+        <div>
+          <label>Offer</label>
+          <input id="newOffer" type="number" step="0.5" placeholder="85" />
+        </div>
+        <div>
+          <label>Offer size ($)</label>
+          <input id="newOfferSize" type="number" min="0" step="1" placeholder="(default)" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label>Size override ($)</label>
+          <input id="newStandardSize" type="number" min="0" step="1" placeholder="(default)" />
+        </div>
+        <div>
+          <label>Increment override (pts)</label>
+          <input id="newIncrement" type="number" min="0" step="0.5" placeholder="(default)" />
+        </div>
+        <div>
+          <label>Auto-move</label>
+          <select id="newAutoMove">
+            <option value="true" selected>On</option>
+            <option value="false">Off</option>
+          </select>
+        </div>
+        <button class="btn" onclick="addPlayer()">Add player</button>
+      </div>
+      <div id="addError" class="small" style="color:var(--red);"></div>
+    </div>
+
+    <div class="section-title">Players &amp; Markets</div>
+    <div class="card" style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>Player</th>
+            <th>Bid</th>
+            <th>Bid size</th>
+            <th>Offer</th>
+            <th>Offer size</th>
+            <th>Size override</th>
+            <th>Increment override</th>
+            <th>Auto</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="playersBody"></tbody>
+      </table>
+    </div>
+
+    <div class="section-title">Live Market Runs</div>
+    <div class="card">
+      <p class="small">Copy and paste into an email to share current markets with bettors. Updates live as markets change.</p>
+      <div id="marketRunsTable" style="font-family:monospace; font-size:13px; white-space:pre; background:#f8f8f8; border-radius:6px; padding:12px 16px; margin-bottom:10px; overflow-x:auto; line-height:1.7;"></div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <button class="btn secondary" onclick="copyMarketRuns()">📋 Copy to clipboard</button>
+        <span id="copyConfirm" class="small hidden" style="color:var(--green);">✓ Copied!</span>
+      </div>
+    </div>
+
+    <div class="section-title">All Bets</div>
+    <div class="card" style="overflow-x:auto;">
+      <div style="margin-bottom:10px;">
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; width:fit-content;">
+          <input type="checkbox" id="groupByPlayer" onchange="loadBets()" />
+          Group by player
+        </label>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Player</th><th>Bettor</th><th>Side</th><th>Line</th><th>Stake</th><th>Status</th><th>Payout</th><th>When</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="betsBody"></tbody>
+      </table>
+    </div>
+
+  </div><!-- #groupView -->
+
+  <!-- Combined view (shown when currentGroup === 'combined') -->
+  <div id="combinedView" class="hidden">
+    <div id="combinedContent"></div>
+  </div>
+
 </main>
 
 <!-- Login modal -->
@@ -244,11 +317,20 @@
 
 <script>
 let adminPasscode = localStorage.getItem('adminPasscode') || '';
+let currentGroup = 'la'; // 'la' | 'london' | 'combined'
+let groupNames = { la: 'LA Bowlers', london: 'London Bowlers' };
 let players = [];
 let pendingBets = [];
 let currentSettings = { standardSize: 10, moveIncrement: 1, shadingDollarsPerPoint: 50, autoMoveCap: 5 };
 let exposureByPlayer = {};
 let openCounterBetId = null;
+
+// Shorthand: add ?g=<currentGroup> to any URL
+function gg(url) {
+  if (currentGroup === 'combined') return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'g=' + currentGroup;
+}
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -260,6 +342,8 @@ function showToast(msg) {
   t.classList.remove('hidden');
   setTimeout(() => t.classList.add('hidden'), 3000);
 }
+
+// ---------- auth ----------
 
 function showLogin() {
   document.getElementById('main').classList.add('hidden');
@@ -294,6 +378,39 @@ async function adminFetch(url, opts = {}) {
   return res;
 }
 
+// ---------- group tabs ----------
+
+function switchGroup(gid) {
+  currentGroup = gid;
+
+  // Update tab active state
+  ['la', 'london', 'combined'].forEach(g => {
+    document.getElementById('tab-' + g).classList.toggle('active', g === gid);
+  });
+
+  // Show/hide views
+  const isGroup = gid !== 'combined';
+  document.getElementById('groupView').classList.toggle('hidden', !isGroup);
+  document.getElementById('combinedView').classList.toggle('hidden', isGroup);
+
+  // Update group name in header labels
+  const name = gid === 'combined' ? 'Combined' : groupNames[gid];
+  document.getElementById('tab-la').textContent = groupNames.la;
+  document.getElementById('tab-london').textContent = groupNames.london;
+
+  if (gid === 'combined') {
+    loadCombined();
+  } else {
+    openCounterBetId = null;
+    loadAll();
+  }
+}
+
+function updateTabLabels() {
+  document.getElementById('tab-la').textContent = groupNames.la;
+  document.getElementById('tab-london').textContent = groupNames.london;
+}
+
 // ---------- settings ----------
 
 async function loadSettings() {
@@ -306,6 +423,12 @@ async function loadSettings() {
   document.getElementById('autoMoveCap').value = s.autoMoveCap ?? 5;
   document.getElementById('passcodeStatus').textContent = s.passcodeSet ? '(currently set)' : '(not set)';
   document.getElementById('noPasscodeBanner').classList.toggle('hidden', !!s.passcodeSet);
+  if (s.groupNames) {
+    groupNames = s.groupNames;
+    document.getElementById('groupNameLa').value = s.groupNames.la || 'LA Bowlers';
+    document.getElementById('groupNameLondon').value = s.groupNames.london || 'London Bowlers';
+    updateTabLabels();
+  }
 }
 
 async function saveSettings() {
@@ -333,6 +456,19 @@ async function saveAlgoSettings() {
   await loadSettings();
 }
 
+async function saveGroupNames() {
+  const la = document.getElementById('groupNameLa').value.trim();
+  const london = document.getElementById('groupNameLondon').value.trim();
+  if (!la || !london) { showToast('Enter names for both groups.'); return; }
+  await adminFetch('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupNames: { la, london } })
+  });
+  showToast('Group names saved.');
+  await loadSettings();
+}
+
 async function setPasscode() {
   const val = document.getElementById('passcodeInput').value;
   if (!val) { showToast('Enter a passcode first.'); return; }
@@ -345,7 +481,7 @@ async function setPasscode() {
   adminPasscode = val;
   localStorage.setItem('adminPasscode', val);
   document.getElementById('passcodeInput').value = '';
-  showToast('Passcode saved. Keep it somewhere safe — you\'ll need it on other devices.');
+  showToast("Passcode saved. Keep it somewhere safe — you'll need it on other devices.");
   await loadSettings();
 }
 
@@ -366,7 +502,7 @@ async function clearPasscode() {
 // ---------- eligible bettors ----------
 
 async function loadBettors() {
-  const res = await adminFetch('/api/admin/bettors');
+  const res = await adminFetch(gg('/api/admin/bettors'));
   const bettors = await res.json();
   const listEl = document.getElementById('bettorsList');
   listEl.innerHTML = '';
@@ -403,7 +539,7 @@ async function addBettor() {
   const name = input.value.trim();
   const pin = pinInput.value.trim();
   if (!name) return;
-  const res = await adminFetch('/api/bettors', {
+  const res = await adminFetch(gg('/api/bettors'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, pin })
@@ -439,7 +575,7 @@ function closePinModal() {
 async function submitPinModal() {
   const val = document.getElementById('pinModalInput').value.trim();
   const name = pinModalTarget;
-  const res = await adminFetch(`/api/bettors/${encodeURIComponent(name)}`, {
+  const res = await adminFetch(gg(`/api/bettors/${encodeURIComponent(name)}`), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pin: val })
@@ -452,7 +588,7 @@ async function submitPinModal() {
 
 async function removeBettor(name) {
   if (!confirm(`Remove "${name}" from the bettors list?`)) return;
-  const res = await adminFetch(`/api/bettors/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  const res = await adminFetch(gg(`/api/bettors/${encodeURIComponent(name)}`), { method: 'DELETE' });
   if (!res.ok) { showToast('Could not remove name.'); return; }
   showToast('Bettor removed.');
   await loadBettors();
@@ -477,7 +613,7 @@ async function addPlayer() {
     return;
   }
 
-  const res = await adminFetch('/api/players', {
+  const res = await adminFetch(gg('/api/players'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -502,7 +638,7 @@ async function addPlayer() {
 }
 
 async function loadPlayers() {
-  const res = await adminFetch('/api/admin/players');
+  const res = await adminFetch(gg('/api/admin/players'));
   players = await res.json();
   renderPlayers();
   renderMarketRuns();
@@ -575,7 +711,7 @@ async function updatePlayer(playerId) {
     return;
   }
 
-  const res = await adminFetch(`/api/players/${playerId}`, {
+  const res = await adminFetch(gg(`/api/players/${playerId}`), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -599,7 +735,7 @@ async function updatePlayer(playerId) {
 
 async function togglePause(playerId, currentStatus) {
   const newStatus = currentStatus === 'paused' ? 'open' : 'paused';
-  await adminFetch(`/api/players/${playerId}`, {
+  await adminFetch(gg(`/api/players/${playerId}`), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status: newStatus })
@@ -612,7 +748,7 @@ async function settlePlayer(playerId) {
   const score = document.getElementById(`score-${playerId}`).value;
   if (score === '') { showToast('Enter a final score first.'); return; }
   if (!confirm('Settle this market? This will grade all open bets and decline any pending requests.')) return;
-  const res = await adminFetch(`/api/players/${playerId}/settle`, {
+  const res = await adminFetch(gg(`/api/players/${playerId}/settle`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ finalScore: Number(score) })
@@ -627,7 +763,7 @@ async function settlePlayer(playerId) {
 
 async function voidPlayer(playerId) {
   if (!confirm('Void this market? All open bets will be refunded (no contest) and pending requests declined.')) return;
-  const res = await adminFetch(`/api/players/${playerId}/void`, { method: 'POST' });
+  const res = await adminFetch(gg(`/api/players/${playerId}/void`), { method: 'POST' });
   if (!res.ok) { showToast('Void failed.'); return; }
   showToast('Market voided. Open bets refunded.');
   await loadAll();
@@ -635,14 +771,14 @@ async function voidPlayer(playerId) {
 
 async function reopenPlayer(playerId) {
   if (!confirm('Reopen this market and revert all bet gradings/refunds?')) return;
-  await adminFetch(`/api/players/${playerId}/reopen`, { method: 'POST' });
+  await adminFetch(gg(`/api/players/${playerId}/reopen`), { method: 'POST' });
   showToast('Market reopened.');
   await loadAll();
 }
 
 async function deletePlayer(playerId) {
   if (!confirm('Delete this player and all associated bets? This cannot be undone.')) return;
-  await adminFetch(`/api/players/${playerId}`, { method: 'DELETE' });
+  await adminFetch(gg(`/api/players/${playerId}`), { method: 'DELETE' });
   showToast('Player deleted.');
   await loadAll();
 }
@@ -657,15 +793,11 @@ function calcCounterMarket(b) {
   const currentOffer = player ? player.offer : (b.requestedPrice ? b.requestedPrice.offer : 0);
 
   // Trade size scaling: magnitude × direction.
-  // Under bet (hit bid) → lower the bid to make unders harder (direction = -1).
-  // Over bet (lift offer) → raise the offer to make overs harder (direction = +1).
   const tradeMovePoints = incr * Math.ceil(b.stake / stdSize);
   const tradeDirection = b.side === 'over' ? 1 : -1;
   const tradeComponent = tradeMovePoints * tradeDirection;
 
   // Exposure shading: already directional — positive = shade up, negative = shade down.
-  // More unders accepted → net long → shade DOWN to discourage more unders.
-  // More overs accepted  → net short → shade UP to discourage more overs.
   const exp = exposureByPlayer[b.playerName] || { overStakes: 0, underStakes: 0 };
   const netOverExposure = (exp.overStakes || 0) - (exp.underStakes || 0);
   const shadingComponent = Math.round(netOverExposure / (currentSettings.shadingDollarsPerPoint || 50));
@@ -680,7 +812,7 @@ function calcCounterMarket(b) {
 }
 
 async function loadPending() {
-  const res = await adminFetch('/api/admin/pending');
+  const res = await adminFetch(gg('/api/admin/pending'));
   pendingBets = await res.json();
   const body = document.getElementById('pendingBody');
   const badge = document.getElementById('pendingBadge');
@@ -703,12 +835,10 @@ async function loadPending() {
     const currentBid = player ? player.bid : '?';
     const currentOffer = player ? player.offer : '?';
 
-    // Highlight the relevant side of the current market
     const marketDisplay = isUnder
       ? `<span style="color:var(--red);font-weight:700;">${currentBid}</span> / ${currentOffer}`
       : `${currentBid} / <span style="color:var(--green);font-weight:700;">${currentOffer}</span>`;
 
-    // Bold colored bet summary
     const betDisplay = isUnder
       ? `<span style="color:var(--red);font-weight:700;font-size:15px;">⬇ Under @ ${requestedLevel}</span><div class="small" style="margin-top:2px;">hit bid</div>`
       : `<span style="color:var(--green);font-weight:700;font-size:15px;">⬆ Over @ ${requestedLevel}</span><div class="small" style="margin-top:2px;">lift offer</div>`;
@@ -733,7 +863,7 @@ async function loadPending() {
     `;
     body.appendChild(tr);
 
-    // Inline counter form — one input for the relevant side only
+    // Inline counter form
     const sideLabel = isUnder ? 'Counter bid at' : 'Counter offer at';
     const sideColor = isUnder ? 'var(--red)' : 'var(--green)';
     const counterRow = document.createElement('tr');
@@ -788,7 +918,6 @@ async function sendCounter(betId) {
   const level = Number(document.getElementById(`counter-level-${betId}`).value);
   if (!level) { showToast('Enter a counter level first.'); return; }
 
-  // Maintain the current spread; compute the other side from it
   const player = players.find(p => p.id === b.playerId);
   const currentSpread = player ? (player.offer - player.bid) : 10;
   const newBid = b.side === 'under' ? level : Math.round((level - currentSpread) * 2) / 2;
@@ -796,7 +925,7 @@ async function sendCounter(betId) {
 
   if (newOffer < newBid) { showToast('Resulting market is inverted — adjust the level.'); return; }
 
-  const res = await adminFetch(`/api/bets/${betId}/counter`, {
+  const res = await adminFetch(gg(`/api/bets/${betId}/counter`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ newBid, newOffer })
@@ -812,7 +941,7 @@ async function sendCounter(betId) {
 }
 
 async function acceptBet(betId) {
-  const res = await adminFetch(`/api/bets/${betId}/accept`, { method: 'POST' });
+  const res = await adminFetch(gg(`/api/bets/${betId}/accept`), { method: 'POST' });
   if (!res.ok) {
     const data = await res.json();
     showToast(data.error || 'Accept failed.');
@@ -823,7 +952,7 @@ async function acceptBet(betId) {
 }
 
 async function declineBet(betId) {
-  const res = await adminFetch(`/api/bets/${betId}/decline`, { method: 'POST' });
+  const res = await adminFetch(gg(`/api/bets/${betId}/decline`), { method: 'POST' });
   if (!res.ok) { showToast('Decline failed.'); return; }
   showToast('Bet declined.');
   await loadAll();
@@ -831,7 +960,7 @@ async function declineBet(betId) {
 
 async function cancelBet(betId) {
   if (!confirm('Cancel this bet and refund the stake? This does not undo any market move it caused.')) return;
-  const res = await adminFetch(`/api/bets/${betId}/cancel`, { method: 'POST' });
+  const res = await adminFetch(gg(`/api/bets/${betId}/cancel`), { method: 'POST' });
   if (!res.ok) { showToast('Cancel failed.'); return; }
   showToast('Bet cancelled and refunded.');
   await loadAll();
@@ -840,7 +969,7 @@ async function cancelBet(betId) {
 // ---------- exposure ----------
 
 async function loadExposure() {
-  const res = await adminFetch('/api/admin/exposure');
+  const res = await adminFetch(gg('/api/admin/exposure'));
   const data = await res.json();
   const body = document.getElementById('exposureBody');
   const foot = document.getElementById('exposureFoot');
@@ -884,7 +1013,6 @@ async function loadExposure() {
     </tr>
   `;
 
-  // Summary cards
   const cardStyle = (val) => `flex:1; min-width:130px; border-radius:8px; padding:12px 16px; background:${val >= 0 ? 'var(--green-bg)' : 'var(--red-bg)'};`;
   const valStyle = (val) => `font-size:24px; font-weight:700; color:${val >= 0 ? 'var(--green)' : 'var(--red)'};`;
   summaryEl.innerHTML = `
@@ -903,6 +1031,73 @@ async function loadExposure() {
   `;
 }
 
+// ---------- combined view ----------
+
+async function loadCombined() {
+  const res = await adminFetch('/api/admin/summary');
+  const data = await res.json();
+  const el = document.getElementById('combinedContent');
+  const gNames = data.groupNames || { la: 'LA Bowlers', london: 'London Bowlers' };
+
+  function summaryCards(t, label) {
+    const cardStyle = (val) => `flex:1; min-width:120px; border-radius:8px; padding:12px 16px; background:${val >= 0 ? 'var(--green-bg)' : 'var(--red-bg)'};`;
+    const valStyle = (val) => `font-size:22px; font-weight:700; color:${val >= 0 ? 'var(--green)' : 'var(--red)'};`;
+    return `
+      <div class="combined-group-header">${label}</div>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px;">
+        <div style="flex:1; min-width:120px; border-radius:8px; padding:12px 16px; background:#f3f4f6;">
+          <div class="small">Stakes held</div>
+          <div style="font-size:22px; font-weight:700;">$${t.stakesHeld}</div>
+        </div>
+        <div style="${cardStyle(t.netIfLow)}">
+          <div class="small">Worst case (all low)</div>
+          <div style="${valStyle(t.netIfLow)}">$${t.netIfLow}</div>
+        </div>
+        <div style="${cardStyle(t.netIfHigh)}">
+          <div class="small">Worst case (all high)</div>
+          <div style="${valStyle(t.netIfHigh)}">$${t.netIfHigh}</div>
+        </div>
+        <div style="flex:1; min-width:120px; border-radius:8px; padding:12px 16px; background:#f3f4f6;">
+          <div class="small">Under stakes</div>
+          <div style="font-size:22px; font-weight:700; color:var(--red);">$${t.underStakes}</div>
+        </div>
+        <div style="flex:1; min-width:120px; border-radius:8px; padding:12px 16px; background:#f3f4f6;">
+          <div class="small">Over stakes</div>
+          <div style="font-size:22px; font-weight:700; color:var(--green);">$${t.overStakes}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function marketTable(markets, groupId) {
+    if (!markets || markets.length === 0) return '<p class="small">No open markets.</p>';
+    const rows = markets.map(p => `
+      <tr>
+        <td>${escapeHtml(p.name)}</td>
+        <td>${p.bid} / ${p.offer}</td>
+        <td><span class="badge ${p.status}">${p.status}</span></td>
+      </tr>
+    `).join('');
+    return `
+      <table style="margin-bottom:12px;">
+        <thead><tr><th>Player</th><th>Market</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="small" style="font-family:monospace;">Bettor link: https://bowling-markets.onrender.com/?g=${groupId}</p>
+    `;
+  }
+
+  el.innerHTML = `
+    ${summaryCards(data.combined, '🌐 Combined Totals')}
+    <div class="section-title" style="margin-top:8px;">${escapeHtml(gNames.la)} — Open Markets</div>
+    <div class="card">${marketTable(data.la.markets, 'la')}</div>
+    ${summaryCards(data.la.totals, escapeHtml(gNames.la) + ' Exposure')}
+    <div class="section-title">${escapeHtml(gNames.london)} — Open Markets</div>
+    <div class="card">${marketTable(data.london.markets, 'london')}</div>
+    ${summaryCards(data.london.totals, escapeHtml(gNames.london) + ' Exposure')}
+  `;
+}
+
 // ---------- live market runs ----------
 
 function renderMarketRuns() {
@@ -915,7 +1110,7 @@ function renderMarketRuns() {
   const maxLen = Math.max(...open.map(p => p.name.length));
   const lines = open.map(p => `${p.name.padEnd(maxLen + 2)} ${p.bid} / ${p.offer}`);
   lines.push('');
-  lines.push('Bet here: https://bowling-markets.onrender.com/');
+  lines.push(`Bet here: https://bowling-markets.onrender.com/?g=${currentGroup}`);
   el.textContent = lines.join('\n');
 }
 
@@ -923,9 +1118,9 @@ async function copyMarketRuns() {
   const text = document.getElementById('marketRunsTable').textContent;
   try {
     await navigator.clipboard.writeText(text);
-    const confirm = document.getElementById('copyConfirm');
-    confirm.classList.remove('hidden');
-    setTimeout(() => confirm.classList.add('hidden'), 2000);
+    const el = document.getElementById('copyConfirm');
+    el.classList.remove('hidden');
+    setTimeout(() => el.classList.add('hidden'), 2000);
   } catch (e) {
     showToast('Could not copy — try selecting and copying manually.');
   }
@@ -934,7 +1129,7 @@ async function copyMarketRuns() {
 // ---------- bets ----------
 
 async function loadBets() {
-  const res = await adminFetch('/api/admin/bets');
+  const res = await adminFetch(gg('/api/admin/bets'));
   const bets = await res.json();
   const body = document.getElementById('betsBody');
   const groupBy = document.getElementById('groupByPlayer') && document.getElementById('groupByPlayer').checked;
@@ -991,6 +1186,10 @@ function renderBetRow(body, b) {
 // ---------- bootstrap ----------
 
 async function loadAll() {
+  if (currentGroup === 'combined') {
+    await loadCombined();
+    return;
+  }
   await loadPlayers();
   await Promise.all([loadPending(), loadExposure(), loadBets(), loadBettors()]);
 }

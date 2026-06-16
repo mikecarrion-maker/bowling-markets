@@ -75,12 +75,21 @@
 <div id="toast" class="toast hidden"></div>
 
 <script>
+// Read group from URL param; default to 'la' for backward compat with existing bettor links
+const groupId = new URLSearchParams(location.search).get('g') || 'la';
+
+// Helper to append ?g= to any URL
+function gq(url) {
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'g=' + groupId;
+}
+
 let players = [];
 let bettors = [];
 let pendingBet = null; // { playerId, side, player }
 
 async function loadBettors() {
-  const res = await fetch('/api/bettors');
+  const res = await fetch(gq('/api/bettors'));
   bettors = await res.json();
   const options = bettors.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
   document.getElementById('myName').innerHTML = '<option value="">Select your name to see your bets</option>' + options;
@@ -94,7 +103,7 @@ const STATUS_LABELS = {
 };
 
 async function loadPlayers() {
-  const res = await fetch('/api/players');
+  const res = await fetch(gq('/api/players'));
   players = await res.json();
   render();
 }
@@ -172,7 +181,7 @@ async function submitBet() {
   if (!name) { errEl.textContent = 'Enter your name.'; return; }
   if (!(stake > 0)) { errEl.textContent = 'Enter a stake greater than 0.'; return; }
 
-  const res = await fetch('/api/bets', {
+  const res = await fetch(gq('/api/bets'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -216,7 +225,7 @@ async function loadMyBets(opts = {}) {
   noBets.classList.add('hidden');
   errEl.classList.add('hidden');
   if (!name) return;
-  const res = await fetch('/api/bets?bettorName=' + encodeURIComponent(name) + '&pin=' + encodeURIComponent(pin));
+  const res = await fetch(gq('/api/bets') + '&bettorName=' + encodeURIComponent(name) + '&pin=' + encodeURIComponent(pin));
   if (res.status === 401) {
     if (!opts.silent) errEl.classList.remove('hidden');
     return;
@@ -263,7 +272,7 @@ async function loadMyBets(opts = {}) {
 async function answerCounter(betId, action) {
   const pin = document.getElementById('myPin').value.trim();
   const endpoint = action === 'accept' ? 'accept-counter' : 'decline-counter';
-  const res = await fetch(`/api/bets/${betId}/${endpoint}`, {
+  const res = await fetch(gq(`/api/bets/${betId}/${endpoint}`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pin })

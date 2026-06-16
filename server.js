@@ -29,6 +29,10 @@ app.get('/style.css', (req, res) => {
 
 // ---------- storage ----------
 
+function defaultGroup() {
+  return { players: [], bets: [], bettors: [] };
+}
+
 function defaultData() {
   return {
     settings: {
@@ -36,25 +40,64 @@ function defaultData() {
       moveIncrement: 1,           // default points the bid & offer shift when a side is exhausted
       adminPasscode: '',          // '' = no passcode set yet, /admin is open
       shadingDollarsPerPoint: 50, // $X of net imbalance per player = 1 point of exposure shading
-      autoMoveCap: 5              // max points the counter-offer algorithm will suggest in one shot
+      autoMoveCap: 5,             // max points the counter-offer algorithm will suggest in one shot
+      groupNames: { la: 'LA Bowlers', london: 'London Bowlers' }
     },
-    players: [],
-    bets: [],
-    bettors: []
+    groups: {
+      la: defaultGroup(),
+      london: defaultGroup()
+    }
   };
 }
 
-function normalize(data) {
-  if (!Array.isArray(data.bettors)) data.bettors = [];
+function normalizeGroup(g) {
+  if (!g || typeof g !== 'object') g = defaultGroup();
+  if (!Array.isArray(g.bettors)) g.bettors = [];
   // migrate old format (array of name strings) to { name, pin } objects
-  data.bettors = data.bettors.map(b => (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' });
-  if (!Array.isArray(data.players)) data.players = [];
-  if (!Array.isArray(data.bets)) data.bets = [];
+  g.bettors = g.bettors.map(b => (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' });
+  if (!Array.isArray(g.players)) g.players = [];
+  if (!Array.isArray(g.bets)) g.bets = [];
+  return g;
+}
+
+function normalize(data) {
   if (!data.settings) data.settings = defaultData().settings;
   // Forward-fill any new settings keys that may not exist in older stored data
   const defaults = defaultData().settings;
-  Object.keys(defaults).forEach(k => { if (data.settings[k] === undefined) data.settings[k] = defaults[k]; });
+  Object.keys(defaults).forEach(k => {
+    if (k === 'groupNames') {
+      if (!data.settings.groupNames) data.settings.groupNames = defaults.groupNames;
+    } else if (data.settings[k] === undefined) {
+      data.settings[k] = defaults[k];
+    }
+  });
+
+  // Migrate from old flat structure (players/bets/bettors at top level) to groups
+  if (!data.groups) {
+    data.groups = {
+      la: {
+        players: Array.isArray(data.players) ? data.players : [],
+        bets: Array.isArray(data.bets) ? data.bets : [],
+        bettors: (Array.isArray(data.bettors) ? data.bettors : []).map(b =>
+          (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' }
+        )
+      },
+      london: defaultGroup()
+    };
+    delete data.players;
+    delete data.bets;
+    delete data.bettors;
+  } else {
+    data.groups.la = normalizeGroup(data.groups.la);
+    data.groups.london = normalizeGroup(data.groups.london);
+  }
+
   return data;
+}
+
+// Return the group object for a given group id (defaults to 'la')
+function getGroup(data, groupId) {
+  return (groupId === 'london') ? data.groups.london : data.groups.la;
 }
 
 let pool = null;
@@ -199,6 +242,39 @@ async function requireAdmin(req, res, next) {
   return res.status(401).json({ error: 'admin passcode required' });
 }
 
+function sortedBettorNames(group) {
+  return group.bettors.map(b => b.name).sort((a, b) => a.localeCompare(b));
+}
+
+function adminBettorList(group) {
+  return group.bettors
+    .map(b => ({ name: b.name, pin: b.pin || '' }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Compute exposure rows for a single group
+function exposureRows(group) {
+  const rows = group.players
+    .filter(p => p.status === 'open' || p.status === 'paused')
+    .map(p => {
+      const openBets = group.bets.filter(b => b.playerId === p.id && b.status === 'open');
+      const underStakes = round2(openBets.filter(b => b.side === 'under').reduce((s, b) => s + b.stake, 0));
+      const overStakes  = round2(openBets.filter(b => b.side === 'over').reduce((s, b) => s + b.stake, 0));
+      const stakesHeld  = round2(underStakes + overStakes);
+      const netIfLow    = round2(overStakes - underStakes);
+      const netIfHigh   = round2(underStakes - overStakes);
+      return { playerId: p.id, name: p.name, stakesHeld, underStakes, overStakes, netIfLow, netIfHigh };
+    });
+  const totals = rows.reduce((acc, r) => ({
+    stakesHeld: round2(acc.stakesHeld + r.stakesHeld),
+    underStakes: round2(acc.underStakes + r.underStakes),
+    overStakes:  round2(acc.overStakes  + r.overStakes),
+    netIfLow:    round2(acc.netIfLow    + r.netIfLow),
+    netIfHigh:   round2(acc.netIfHigh   + r.netIfHigh)
+  }), { stakesHeld: 0, underStakes: 0, overStakes: 0, netIfLow: 0, netIfHigh: 0 });
+  return { rows, totals };
+}
+
 // ---------- public status ----------
 
 app.get('/api/admin/status', async (req, res) => {
@@ -217,12 +293,16 @@ app.get('/api/settings', async (req, res) => {
 
 app.put('/api/settings', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const { standardSize, moveIncrement, adminPasscode, shadingDollarsPerPoint, autoMoveCap } = req.body;
+  const { standardSize, moveIncrement, adminPasscode, shadingDollarsPerPoint, autoMoveCap, groupNames } = req.body;
   if (standardSize != null) data.settings.standardSize = Number(standardSize);
   if (moveIncrement != null) data.settings.moveIncrement = Number(moveIncrement);
   if (adminPasscode !== undefined) data.settings.adminPasscode = String(adminPasscode || '');
   if (shadingDollarsPerPoint != null) data.settings.shadingDollarsPerPoint = Math.max(1, Number(shadingDollarsPerPoint));
   if (autoMoveCap != null) data.settings.autoMoveCap = Math.max(1, Number(autoMoveCap));
+  if (groupNames) {
+    if (groupNames.la) data.settings.groupNames.la = String(groupNames.la).trim();
+    if (groupNames.london) data.settings.groupNames.london = String(groupNames.london).trim();
+  }
   await saveData(data);
   const { adminPasscode: _omit, ...rest } = data.settings;
   res.json({ ...rest, passcodeSet: !!data.settings.adminPasscode });
@@ -230,75 +310,72 @@ app.put('/api/settings', requireAdmin, async (req, res) => {
 
 // ---------- eligible bettors ----------
 
-function sortedBettorNames(data) {
-  return data.bettors.map(b => b.name).sort((a, b) => a.localeCompare(b));
-}
-
-function adminBettorList(data) {
-  return data.bettors
-    .map(b => ({ name: b.name, pin: b.pin || '' }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-// Public: list of names for the bettor-view dropdown.
+// Public: list of names for the bettor-view dropdown. ?g=la|london
 app.get('/api/bettors', async (req, res) => {
   const data = await loadData();
-  res.json(sortedBettorNames(data));
+  const group = getGroup(data, req.query.g);
+  res.json(sortedBettorNames(group));
 });
 
 // Admin: full list including whether each bettor has a PIN set.
 app.get('/api/admin/bettors', requireAdmin, async (req, res) => {
   const data = await loadData();
-  res.json(adminBettorList(data));
+  const group = getGroup(data, req.query.g);
+  res.json(adminBettorList(group));
 });
 
 app.post('/api/bettors', requireAdmin, async (req, res) => {
   const data = await loadData();
+  const group = getGroup(data, req.query.g);
   const { name, pin } = req.body;
   const trimmed = name == null ? '' : String(name).trim();
   if (!trimmed) return res.status(400).json({ error: 'name is required' });
-  if (data.bettors.some(b => b.name.toLowerCase() === trimmed.toLowerCase())) {
+  if (group.bettors.some(b => b.name.toLowerCase() === trimmed.toLowerCase())) {
     return res.status(400).json({ error: 'that name is already on the list' });
   }
-  data.bettors.push({ name: trimmed, pin: pin ? String(pin).trim() : '' });
+  group.bettors.push({ name: trimmed, pin: pin ? String(pin).trim() : '' });
   await saveData(data);
-  res.status(201).json(adminBettorList(data));
+  res.status(201).json(adminBettorList(group));
 });
 
 // Admin: set, change, or clear (empty pin) a bettor's PIN.
 app.put('/api/bettors/:name', requireAdmin, async (req, res) => {
   const data = await loadData();
+  const group = getGroup(data, req.query.g);
   const target = req.params.name.toLowerCase();
-  const bettor = data.bettors.find(b => b.name.toLowerCase() === target);
+  const bettor = group.bettors.find(b => b.name.toLowerCase() === target);
   if (!bettor) return res.status(404).json({ error: 'name not found' });
   bettor.pin = req.body.pin ? String(req.body.pin).trim() : '';
   await saveData(data);
-  res.json(adminBettorList(data));
+  res.json(adminBettorList(group));
 });
 
 app.delete('/api/bettors/:name', requireAdmin, async (req, res) => {
   const data = await loadData();
+  const group = getGroup(data, req.query.g);
   const target = req.params.name.toLowerCase();
-  const before = data.bettors.length;
-  data.bettors = data.bettors.filter(b => b.name.toLowerCase() !== target);
-  if (data.bettors.length === before) return res.status(404).json({ error: 'name not found' });
+  const before = group.bettors.length;
+  group.bettors = group.bettors.filter(b => b.name.toLowerCase() !== target);
+  if (group.bettors.length === before) return res.status(404).json({ error: 'name not found' });
   await saveData(data);
-  res.json(adminBettorList(data));
+  res.json(adminBettorList(group));
 });
 
 // ---------- players / markets ----------
 
-// Public list (bettor view)
+// Public list (bettor view). ?g=la|london
 app.get('/api/players', async (req, res) => {
   const data = await loadData();
-  res.json(data.players.map(publicPlayer));
+  const group = getGroup(data, req.query.g);
+  res.json(group.players.map(publicPlayer));
 });
 
 // Full detail (admin view)
 app.get('/api/admin/players', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const enriched = data.players.map(p => {
-    const bets = data.bets.filter(b => b.playerId === p.id);
+  const group = getGroup(data, req.query.g);
+  const enriched = group.players.map(p => {
+    const bets = group.bets.filter(b => b.playerId === p.id);
     const pendingCount = bets.filter(b => b.status === 'pending').length;
     return { ...p, betCount: bets.length, pendingCount };
   });
@@ -307,6 +384,7 @@ app.get('/api/admin/players', requireAdmin, async (req, res) => {
 
 app.post('/api/players', requireAdmin, async (req, res) => {
   const data = await loadData();
+  const group = getGroup(data, req.query.g);
   const { name, bid, offer, bidSize, offerSize, standardSize, moveIncrement, autoMoveEnabled } = req.body;
   if (!name || bid == null || offer == null) {
     return res.status(400).json({ error: 'name, bid and offer are required' });
@@ -329,7 +407,7 @@ app.post('/api/players', requireAdmin, async (req, res) => {
   player.bidSize = bidSize != null && bidSize !== '' ? Number(bidSize) : eff.standardSize;
   player.offerSize = offerSize != null && offerSize !== '' ? Number(offerSize) : eff.standardSize;
 
-  data.players.push(player);
+  group.players.push(player);
   await saveData(data);
   res.status(201).json(player);
 });
@@ -337,7 +415,8 @@ app.post('/api/players', requireAdmin, async (req, res) => {
 // Manual override of a player's market / config / pause-resume
 app.put('/api/players/:id', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const player = data.players.find(p => p.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const player = group.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status === 'settled' || player.status === 'voided') {
     return res.status(400).json({ error: 'reopen this market before editing it' });
@@ -372,10 +451,11 @@ app.put('/api/players/:id', requireAdmin, async (req, res) => {
 
 app.delete('/api/players/:id', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const before = data.players.length;
-  data.players = data.players.filter(p => p.id !== req.params.id);
-  if (data.players.length === before) return res.status(404).json({ error: 'player not found' });
-  data.bets = data.bets.filter(b => b.playerId !== req.params.id);
+  const group = getGroup(data, req.query.g);
+  const before = group.players.length;
+  group.players = group.players.filter(p => p.id !== req.params.id);
+  if (group.players.length === before) return res.status(404).json({ error: 'player not found' });
+  group.bets = group.bets.filter(b => b.playerId !== req.params.id);
   await saveData(data);
   res.json({ ok: true });
 });
@@ -383,7 +463,8 @@ app.delete('/api/players/:id', requireAdmin, async (req, res) => {
 // Settle a player's market: enter the final score, grade all open bets.
 app.post('/api/players/:id/settle', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const player = data.players.find(p => p.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const player = group.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status === 'settled' || player.status === 'voided') {
     return res.status(400).json({ error: 'market is already settled or voided' });
@@ -397,10 +478,9 @@ app.post('/api/players/:id/settle', requireAdmin, async (req, res) => {
   player.status = 'settled';
 
   let declinedPending = 0;
-  data.bets.forEach(b => {
+  group.bets.forEach(b => {
     if (b.playerId !== player.id) return;
     if (b.status === 'pending' || b.status === 'countered') {
-      // can't honor unaccepted/unanswered requests once the market is settled
       b.status = 'declined';
       b.payout = 0;
       declinedPending++;
@@ -422,17 +502,18 @@ app.post('/api/players/:id/settle', requireAdmin, async (req, res) => {
   });
 
   await saveData(data);
-  res.json({ player, bets: data.bets.filter(b => b.playerId === player.id), declinedPending });
+  res.json({ player, bets: group.bets.filter(b => b.playerId === player.id), declinedPending });
 });
 
 // Reopen a settled or voided market (undo)
 app.post('/api/players/:id/reopen', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const player = data.players.find(p => p.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const player = group.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
   player.status = 'open';
   player.finalScore = null;
-  data.bets.forEach(b => {
+  group.bets.forEach(b => {
     if (b.playerId === player.id && ['won', 'lost', 'push', 'voided'].includes(b.status)) {
       b.status = 'open';
       b.payout = null;
@@ -445,14 +526,15 @@ app.post('/api/players/:id/reopen', requireAdmin, async (req, res) => {
 // Void a player's market entirely: no contest, refund every open bet.
 app.post('/api/players/:id/void', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const player = data.players.find(p => p.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const player = group.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status === 'settled' || player.status === 'voided') {
     return res.status(400).json({ error: 'market is already settled or voided' });
   }
   player.status = 'voided';
   player.finalScore = null;
-  data.bets.forEach(b => {
+  group.bets.forEach(b => {
     if (b.playerId !== player.id) return;
     if (b.status === 'open') {
       b.status = 'voided';
@@ -463,45 +545,52 @@ app.post('/api/players/:id/void', requireAdmin, async (req, res) => {
     }
   });
   await saveData(data);
-  res.json({ player, bets: data.bets.filter(b => b.playerId === player.id) });
+  res.json({ player, bets: group.bets.filter(b => b.playerId === player.id) });
 });
 
 // ---------- exposure / risk ----------
 
 app.get('/api/admin/exposure', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const rows = data.players
-    .filter(p => p.status === 'open' || p.status === 'paused')
-    .map(p => {
-      const openBets = data.bets.filter(b => b.playerId === p.id && b.status === 'open');
-      const underStakes = round2(openBets.filter(b => b.side === 'under').reduce((s, b) => s + b.stake, 0));
-      const overStakes = round2(openBets.filter(b => b.side === 'over').reduce((s, b) => s + b.stake, 0));
-      const stakesHeld = round2(underStakes + overStakes);
-      // If the score lands below everyone's bid: all "under" bets win (paid 2x), all "over" bets lose.
-      const netIfLow = round2(overStakes - underStakes);
-      // If the score lands above everyone's offer: all "over" bets win (paid 2x), all "under" bets lose.
-      const netIfHigh = round2(underStakes - overStakes);
-      return { playerId: p.id, name: p.name, stakesHeld, underStakes, overStakes, netIfLow, netIfHigh };
-    });
-  const totals = rows.reduce((acc, r) => ({
-    stakesHeld: round2(acc.stakesHeld + r.stakesHeld),
-    underStakes: round2(acc.underStakes + r.underStakes),
-    overStakes: round2(acc.overStakes + r.overStakes),
-    netIfLow: round2(acc.netIfLow + r.netIfLow),
-    netIfHigh: round2(acc.netIfHigh + r.netIfHigh)
+  const group = getGroup(data, req.query.g);
+  res.json(exposureRows(group));
+});
+
+// Combined summary across both groups
+app.get('/api/admin/summary', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const la     = exposureRows(data.groups.la);
+  const london  = exposureRows(data.groups.london);
+  const combined = [la.totals, london.totals].reduce((acc, t) => ({
+    stakesHeld: round2(acc.stakesHeld + t.stakesHeld),
+    underStakes: round2(acc.underStakes + t.underStakes),
+    overStakes:  round2(acc.overStakes  + t.overStakes),
+    netIfLow:    round2(acc.netIfLow    + t.netIfLow),
+    netIfHigh:   round2(acc.netIfHigh   + t.netIfHigh)
   }), { stakesHeld: 0, underStakes: 0, overStakes: 0, netIfLow: 0, netIfHigh: 0 });
-  res.json({ rows, totals });
+
+  // Open markets per group for market runs display
+  const laMarkets    = data.groups.la.players.filter(p => p.status === 'open' || p.status === 'paused');
+  const londonMarkets = data.groups.london.players.filter(p => p.status === 'open' || p.status === 'paused');
+
+  res.json({
+    la:      { ...la,     markets: laMarkets.map(publicPlayer)     },
+    london:  { ...london, markets: londonMarkets.map(publicPlayer) },
+    combined,
+    groupNames: data.settings.groupNames
+  });
 });
 
 // ---------- bets ----------
 
 app.get('/api/bets', async (req, res) => {
   const data = await loadData();
-  let bets = data.bets;
+  const group = getGroup(data, req.query.g);
+  let bets = group.bets;
   if (req.query.playerId) bets = bets.filter(b => b.playerId === req.query.playerId);
   if (req.query.bettorName) {
     const name = String(req.query.bettorName);
-    const bettor = data.bettors.find(b => b.name.toLowerCase() === name.toLowerCase());
+    const bettor = group.bettors.find(b => b.name.toLowerCase() === name.toLowerCase());
     if (bettor && bettor.pin) {
       const providedPin = req.query.pin == null ? '' : String(req.query.pin);
       if (providedPin !== bettor.pin) {
@@ -511,28 +600,31 @@ app.get('/api/bets', async (req, res) => {
     bets = bets.filter(b => b.bettorName.toLowerCase() === name.toLowerCase());
   }
   bets = [...bets].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-  const playerNames = Object.fromEntries(data.players.map(p => [p.id, p.name]));
+  const playerNames = Object.fromEntries(group.players.map(p => [p.id, p.name]));
   res.json(bets.map(b => ({ ...b, playerName: playerNames[b.playerId] || '?' })));
 });
 
 // Admin-only: full bet list including bettor names, for the admin bets table.
 app.get('/api/admin/bets', requireAdmin, async (req, res) => {
   const data = await loadData();
-  let bets = [...data.bets].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-  const playerNames = Object.fromEntries(data.players.map(p => [p.id, p.name]));
+  const group = getGroup(data, req.query.g);
+  let bets = [...group.bets].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  const playerNames = Object.fromEntries(group.players.map(p => [p.id, p.name]));
   res.json(bets.map(b => ({ ...b, playerName: playerNames[b.playerId] || '?' })));
 });
 
 app.get('/api/admin/pending', requireAdmin, async (req, res) => {
   const data = await loadData();
-  let bets = data.bets.filter(b => b.status === 'pending');
+  const group = getGroup(data, req.query.g);
+  let bets = group.bets.filter(b => b.status === 'pending');
   bets = bets.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  const playerNames = Object.fromEntries(data.players.map(p => [p.id, p.name]));
+  const playerNames = Object.fromEntries(group.players.map(p => [p.id, p.name]));
   res.json(bets.map(b => ({ ...b, playerName: playerNames[b.playerId] || '?' })));
 });
 
 app.post('/api/bets', async (req, res) => {
   const data = await loadData();
+  const group = getGroup(data, req.query.g);
   const { playerId, bettorName, side, stake } = req.body;
 
   if (!playerId || !bettorName || !side || stake == null) {
@@ -542,8 +634,8 @@ app.post('/api/bets', async (req, res) => {
     return res.status(400).json({ error: "side must be 'over' or 'under'" });
   }
   let canonicalName = String(bettorName).trim();
-  if (data.bettors.length > 0) {
-    const match = data.bettors.find(b => b.name.toLowerCase() === canonicalName.toLowerCase());
+  if (group.bettors.length > 0) {
+    const match = group.bettors.find(b => b.name.toLowerCase() === canonicalName.toLowerCase());
     if (!match) {
       return res.status(400).json({ error: 'select your name from the bettors list' });
     }
@@ -553,7 +645,7 @@ app.post('/api/bets', async (req, res) => {
   if (!(stakeNum > 0)) {
     return res.status(400).json({ error: 'stake must be a positive number' });
   }
-  const player = data.players.find(p => p.id === playerId);
+  const player = group.players.find(p => p.id === playerId);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status !== 'open') {
     return res.status(400).json({ error: 'this market is not open for betting' });
@@ -581,7 +673,7 @@ app.post('/api/bets', async (req, res) => {
     bet.requestedPrice = { bid: player.bid, offer: player.offer };
   }
 
-  data.bets.push(bet);
+  group.bets.push(bet);
   await saveData(data);
   res.status(201).json({ bet, player });
 });
@@ -589,10 +681,11 @@ app.post('/api/bets', async (req, res) => {
 // Accept a pending bet: locks in the CURRENT price, consumes size, may trigger auto-move.
 app.post('/api/bets/:id/accept', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const bet = data.bets.find(b => b.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const bet = group.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'pending') return res.status(400).json({ error: 'bet is not pending' });
-  const player = data.players.find(p => p.id === bet.playerId);
+  const player = group.players.find(p => p.id === bet.playerId);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status !== 'open') return res.status(400).json({ error: 'market is not open' });
 
@@ -606,7 +699,8 @@ app.post('/api/bets/:id/accept', requireAdmin, async (req, res) => {
 
 app.post('/api/bets/:id/decline', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const bet = data.bets.find(b => b.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const bet = group.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'pending') return res.status(400).json({ error: 'bet is not pending' });
   bet.status = 'declined';
@@ -619,10 +713,11 @@ app.post('/api/bets/:id/decline', requireAdmin, async (req, res) => {
 // live immediately. The bet flips to "countered" and waits for the bettor to accept/decline.
 app.post('/api/bets/:id/counter', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const bet = data.bets.find(b => b.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const bet = group.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'pending') return res.status(400).json({ error: 'bet is not pending' });
-  const player = data.players.find(p => p.id === bet.playerId);
+  const player = group.players.find(p => p.id === bet.playerId);
   if (!player) return res.status(404).json({ error: 'player not found' });
   if (player.status !== 'open') return res.status(400).json({ error: 'market is not open' });
 
@@ -646,17 +741,18 @@ app.post('/api/bets/:id/counter', requireAdmin, async (req, res) => {
 // Bettor accepts a countered bet: confirmed at the counter price.
 app.post('/api/bets/:id/accept-counter', async (req, res) => {
   const data = await loadData();
-  const bet = data.bets.find(b => b.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const bet = group.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'countered') return res.status(400).json({ error: 'bet is not countered' });
 
-  const bettor = data.bettors.find(b => b.name.toLowerCase() === bet.bettorName.toLowerCase());
+  const bettor = group.bettors.find(b => b.name.toLowerCase() === bet.bettorName.toLowerCase());
   if (bettor && bettor.pin) {
     const providedPin = req.body.pin == null ? '' : String(req.body.pin);
     if (providedPin !== bettor.pin) return res.status(401).json({ error: 'incorrect pin' });
   }
 
-  const player = data.players.find(p => p.id === bet.playerId);
+  const player = group.players.find(p => p.id === bet.playerId);
   if (!player) return res.status(404).json({ error: 'player not found' });
 
   bet.price = bet.counterPrice;
@@ -670,11 +766,12 @@ app.post('/api/bets/:id/accept-counter', async (req, res) => {
 // Bettor declines a countered bet: no action, stake returned.
 app.post('/api/bets/:id/decline-counter', async (req, res) => {
   const data = await loadData();
-  const bet = data.bets.find(b => b.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const bet = group.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'countered') return res.status(400).json({ error: 'bet is not countered' });
 
-  const bettor = data.bettors.find(b => b.name.toLowerCase() === bet.bettorName.toLowerCase());
+  const bettor = group.bettors.find(b => b.name.toLowerCase() === bet.bettorName.toLowerCase());
   if (bettor && bettor.pin) {
     const providedPin = req.body.pin == null ? '' : String(req.body.pin);
     if (providedPin !== bettor.pin) return res.status(401).json({ error: 'incorrect pin' });
@@ -691,7 +788,8 @@ app.post('/api/bets/:id/decline-counter', async (req, res) => {
 // that already happened as a result of this bet.
 app.post('/api/bets/:id/cancel', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const bet = data.bets.find(b => b.id === req.params.id);
+  const group = getGroup(data, req.query.g);
+  const bet = group.bets.find(b => b.id === req.params.id);
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'open') return res.status(400).json({ error: 'only open bets can be cancelled' });
   bet.status = 'cancelled';
