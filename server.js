@@ -56,6 +56,12 @@ function normalizeGroup(g) {
   // migrate old format (array of name strings) to { name, pin } objects
   g.bettors = g.bettors.map(b => (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' });
   if (!Array.isArray(g.players)) g.players = [];
+  // Ensure every player has the mode and pings fields (migration for existing records)
+  g.players = g.players.map(p => ({
+    ...p,
+    mode: p.mode || 'algo',
+    pings: Array.isArray(p.pings) ? p.pings : []
+  }));
   if (!Array.isArray(g.bets)) g.bets = [];
   return g;
 }
@@ -180,6 +186,7 @@ function effective(player, settings) {
 
 function publicPlayer(p) {
   // Shape sent to the bettor view - price + available size on each side only.
+  const mode = p.mode || 'algo';
   return {
     id: p.id,
     name: p.name,
@@ -188,7 +195,11 @@ function publicPlayer(p) {
     offer: p.offer,
     offerSize: p.offerSize,
     status: p.status,
-    finalScore: p.finalScore
+    finalScore: p.finalScore,
+    mode,
+    // In finite mode, tell the bettor view when a side has no more liquidity
+    bidExhausted: mode === 'finite' && p.bidSize <= 0,
+    offerExhausted: mode === 'finite' && p.offerSize <= 0
   };
 }
 
@@ -222,13 +233,14 @@ function fillBet(player, side, stake, settings) {
     player.bidSize = round2(player.bidSize - stake);
     if (player.bidSize <= 0) {
       player.bidSize = 0;
-      handleExhaustion(player, 'under', settings);
+      // In finite mode, no auto-move — market maker re-racks manually
+      if ((player.mode || 'algo') !== 'finite') handleExhaustion(player, 'under', settings);
     }
   } else {
     player.offerSize = round2(player.offerSize - stake);
     if (player.offerSize <= 0) {
       player.offerSize = 0;
-      handleExhaustion(player, 'over', settings);
+      if ((player.mode || 'algo') !== 'finite') handleExhaustion(player, 'over', settings);
     }
   }
 }
@@ -377,7 +389,8 @@ app.get('/api/admin/players', requireAdmin, async (req, res) => {
   const enriched = group.players.map(p => {
     const bets = group.bets.filter(b => b.playerId === p.id);
     const pendingCount = bets.filter(b => b.status === 'pending').length;
-    return { ...p, betCount: bets.length, pendingCount };
+    const pingCount = (p.pings || []).filter(pg => pg.status === 'waiting').length;
+    return { ...p, betCount: bets.length, pendingCount, pingCount };
   });
   res.json(enriched);
 });
@@ -400,6 +413,8 @@ app.post('/api/players', requireAdmin, async (req, res) => {
     standardSize: standardSize != null && standardSize !== '' ? Number(standardSize) : null,
     moveIncrement: moveIncrement != null && moveIncrement !== '' ? Number(moveIncrement) : null,
     autoMoveEnabled: autoMoveEnabled !== false,
+    mode: 'algo', // 'algo' | 'finite'
+    pings: [],    // interest pings for finite mode: [{id, bettorName, side, timestamp, status}]
     status: 'open', // open | paused | voided | settled
     finalScore: null
   };
@@ -424,7 +439,7 @@ app.put('/api/players/:id', requireAdmin, async (req, res) => {
 
   const {
     name, bid, offer, bidSize, offerSize,
-    standardSize, moveIncrement, autoMoveEnabled, status
+    standardSize, moveIncrement, autoMoveEnabled, status, mode
   } = req.body;
 
   if (name != null) player.name = String(name).trim();
@@ -433,8 +448,22 @@ app.put('/api/players/:id', requireAdmin, async (req, res) => {
   if (player.offer < player.bid) {
     return res.status(400).json({ error: 'offer must be >= bid' });
   }
-  if (bidSize != null) player.bidSize = Math.max(0, Number(bidSize));
-  if (offerSize != null) player.offerSize = Math.max(0, Number(offerSize));
+  // Mode toggle: 'algo' | 'finite'. Switching back to algo clears all pings.
+  if (mode === 'algo' || mode === 'finite') {
+    player.mode = mode;
+    if (mode === 'algo') player.pings = [];
+  }
+  if (!Array.isArray(player.pings)) player.pings = [];
+  if (bidSize != null) {
+    player.bidSize = Math.max(0, Number(bidSize));
+    // Re-racking bid side: expire any outstanding invitations so bettors must re-ping
+    player.pings = player.pings.filter(p => !(p.side === 'under' && p.status === 'invited'));
+  }
+  if (offerSize != null) {
+    player.offerSize = Math.max(0, Number(offerSize));
+    // Re-racking offer side: expire any outstanding invitations
+    player.pings = player.pings.filter(p => !(p.side === 'over' && p.status === 'invited'));
+  }
   if (standardSize !== undefined) player.standardSize = standardSize === '' || standardSize === null ? null : Number(standardSize);
   if (moveIncrement !== undefined) player.moveIncrement = moveIncrement === '' || moveIncrement === null ? null : Number(moveIncrement);
   if (autoMoveEnabled != null) player.autoMoveEnabled = !!autoMoveEnabled;
@@ -652,6 +681,18 @@ app.post('/api/bets', async (req, res) => {
   }
 
   const remaining = side === 'under' ? player.bidSize : player.offerSize;
+  const playerMode = player.mode || 'algo';
+
+  // Finite mode: hard limits — no pending/oversized bets allowed
+  if (playerMode === 'finite') {
+    if (remaining <= 0) {
+      return res.status(409).json({ error: 'No liquidity on that side right now — register your interest instead.' });
+    }
+    if (stakeNum > remaining) {
+      return res.status(400).json({ error: `Only $${remaining} available on that side — reduce your stake.` });
+    }
+  }
+
   const bet = {
     id: id('b'),
     playerId,
@@ -662,12 +703,19 @@ app.post('/api/bets', async (req, res) => {
     payout: null
   };
 
-  if (stakeNum <= remaining) {
+  if (playerMode === 'finite' || stakeNum <= remaining) {
     bet.status = 'open';
     bet.price = { bid: player.bid, offer: player.offer };
     bet.requestedPrice = null;
     fillBet(player, side, stakeNum, data.settings);
+    // Clear any outstanding ping for this bettor/player/side (invitation fulfilled)
+    if (Array.isArray(player.pings)) {
+      player.pings = player.pings.filter(pg =>
+        !(pg.bettorName.toLowerCase() === canonicalName.toLowerCase() && pg.side === side)
+      );
+    }
   } else {
+    // Algo mode only: oversized bet goes pending for market maker review
     bet.status = 'pending';
     bet.price = null;
     bet.requestedPrice = { bid: player.bid, offer: player.offer };
@@ -796,6 +844,124 @@ app.post('/api/bets/:id/cancel', requireAdmin, async (req, res) => {
   bet.payout = bet.stake;
   await saveData(data);
   res.json({ bet });
+});
+
+// ---------- finite mode pings ----------
+
+// Bettor registers interest when a finite-mode side is exhausted.
+app.post('/api/players/:id/ping', async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  const player = group.players.find(p => p.id === req.params.id);
+  if (!player) return res.status(404).json({ error: 'player not found' });
+  if ((player.mode || 'algo') !== 'finite') {
+    return res.status(400).json({ error: 'this market is not in manual mode' });
+  }
+  if (player.status !== 'open') {
+    return res.status(400).json({ error: 'market is not open' });
+  }
+
+  const { bettorName, side } = req.body;
+  if (!bettorName || !side) return res.status(400).json({ error: 'bettorName and side are required' });
+  if (side !== 'over' && side !== 'under') return res.status(400).json({ error: "side must be 'over' or 'under'" });
+
+  let canonicalName = String(bettorName).trim();
+  if (group.bettors.length > 0) {
+    const match = group.bettors.find(b => b.name.toLowerCase() === canonicalName.toLowerCase());
+    if (!match) return res.status(400).json({ error: 'select your name from the bettors list' });
+    canonicalName = match.name;
+  }
+
+  const remaining = side === 'under' ? player.bidSize : player.offerSize;
+  if (remaining > 0) {
+    return res.status(400).json({ error: 'liquidity is still available — place a bet instead' });
+  }
+
+  // No duplicate pings per bettor/side
+  const existing = (player.pings || []).find(p =>
+    p.bettorName.toLowerCase() === canonicalName.toLowerCase() && p.side === side
+  );
+  if (existing) {
+    return res.status(400).json({ error: "you're already in the queue for that side" });
+  }
+
+  const ping = {
+    id: id('ping'),
+    bettorName: canonicalName,
+    side,
+    timestamp: new Date().toISOString(),
+    status: 'waiting'
+  };
+  if (!Array.isArray(player.pings)) player.pings = [];
+  player.pings.push(ping);
+  await saveData(data);
+  res.status(201).json({ ok: true, message: "Interest recorded — we'll let you know when liquidity is back." });
+});
+
+// Bettor fetches their active invitations (finite mode, status='invited').
+app.get('/api/invitations', async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  const bettorName = req.query.bettorName;
+  if (!bettorName) return res.json([]);
+
+  // PIN check (same as /api/bets)
+  const bettor = group.bettors.find(b => b.name.toLowerCase() === bettorName.toLowerCase());
+  if (bettor && bettor.pin) {
+    const providedPin = req.query.pin == null ? '' : String(req.query.pin);
+    if (providedPin !== bettor.pin) return res.status(401).json({ error: 'incorrect pin' });
+  }
+
+  const invitations = [];
+  group.players.forEach(p => {
+    if (!Array.isArray(p.pings)) return;
+    p.pings.forEach(pg => {
+      if (pg.bettorName.toLowerCase() === bettorName.toLowerCase() && pg.status === 'invited') {
+        invitations.push({
+          pingId: pg.id,
+          playerId: p.id,
+          playerName: p.name,
+          side: pg.side,
+          currentBid: p.bid,
+          currentOffer: p.offer,
+          bidSize: p.bidSize,
+          offerSize: p.offerSize,
+          timestamp: pg.timestamp
+        });
+      }
+    });
+  });
+  res.json(invitations);
+});
+
+// Admin: promote a waiting ping to 'invited' — bettor gets a "you're up" notification.
+app.post('/api/admin/players/:id/pings/:pingId/invite', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  const player = group.players.find(p => p.id === req.params.id);
+  if (!player) return res.status(404).json({ error: 'player not found' });
+
+  const ping = (player.pings || []).find(p => p.id === req.params.pingId);
+  if (!ping) return res.status(404).json({ error: 'ping not found' });
+
+  ping.status = 'invited';
+  await saveData(data);
+  res.json({ ping, player: { id: player.id, name: player.name } });
+});
+
+// Admin: remove a ping from the queue entirely.
+app.delete('/api/admin/players/:id/pings/:pingId', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  const player = group.players.find(p => p.id === req.params.id);
+  if (!player) return res.status(404).json({ error: 'player not found' });
+
+  const before = (player.pings || []).length;
+  player.pings = (player.pings || []).filter(p => p.id !== req.params.pingId);
+  if (player.pings.length === before) return res.status(404).json({ error: 'ping not found' });
+
+  await saveData(data);
+  res.json({ ok: true });
 });
 
 // ---------- pages ----------

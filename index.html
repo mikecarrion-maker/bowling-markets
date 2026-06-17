@@ -5,6 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Bowling Tournament Markets</title>
 <link rel="stylesheet" href="style.css" />
+<style>
+.btn-interest {
+  font-size: 11px;
+  padding: 2px 9px;
+  background: none;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  color: #6b7280;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.5;
+}
+.btn-interest:hover {
+  background: #f3f4f6;
+  color: #374151;
+}
+</style>
 </head>
 <body>
 <header>
@@ -36,6 +53,11 @@
         <input id="myPin" type="password" inputmode="numeric" placeholder="if set" style="width:100px;" />
       </div>
       <button class="btn secondary" onclick="loadMyBets()">Show my bets</button>
+    </div>
+    <!-- Invitations: shown when market maker has invited this bettor to bet -->
+    <div id="invitationsSection" class="hidden" style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
+      <div style="font-size:12px; font-weight:700; color:#7c3aed; margin-bottom:8px; letter-spacing:0.02em;">✅ YOU'RE UP</div>
+      <div id="invitationsList"></div>
     </div>
     <table id="betsTable">
       <thead>
@@ -108,6 +130,23 @@ async function loadPlayers() {
   render();
 }
 
+// Returns HTML for one price side, handling finite-mode exhaustion.
+function priceSideHtml(p, side) {
+  const isUnder = side === 'under';
+  const level = isUnder ? p.bid : p.offer;
+  const isOpen = p.status === 'open';
+  const isExhausted = isUnder ? p.bidExhausted : p.offerExhausted;
+
+  if (!isOpen) {
+    return `<span class="price ${side} disabled">${level}</span>`;
+  }
+  if (isExhausted) {
+    // Side has no liquidity in finite/manual mode — show greyed price + interest button
+    return `<span class="price ${side} disabled" style="opacity:0.35;">${level}</span><button class="btn-interest" onclick="registerInterest('${p.id}', '${side}')">Register interest</button>`;
+  }
+  return `<span class="price ${side}" onclick='openModal(${JSON.stringify(p.id)}, "${side}")'>${level}</span>`;
+}
+
 function render() {
   const container = document.getElementById('players');
   container.innerHTML = '';
@@ -133,10 +172,10 @@ function render() {
         <div class="player-name">${escapeHtml(p.name)}</div>
         <div class="player-meta">${statusBadge}</div>
       </div>
-      <div class="market rail">
-        <span class="price under ${disabled(p) ? 'disabled' : ''}" ${disabled(p) ? '' : `onclick='openModal(${JSON.stringify(p.id)}, "under")'`}>${p.bid}</span>
+      <div class="market rail" style="flex-wrap:wrap; gap:6px;">
+        ${priceSideHtml(p, 'under')}
         <span class="slash">/</span>
-        <span class="price over ${disabled(p) ? 'disabled' : ''}" ${disabled(p) ? '' : `onclick='openModal(${JSON.stringify(p.id)}, "over")'`}>${p.offer}</span>
+        ${priceSideHtml(p, 'over')}
         <span class="size">${p.bidSize} x ${p.offerSize}</span>
       </div>
     `;
@@ -160,8 +199,13 @@ function openModal(playerId, side) {
   const verb = side === 'under' ? 'Hit the Bid' : 'Lift the Offer';
   document.getElementById('modalTitle').textContent =
     `${verb} on ${player.name} @ ${line}`;
-  document.getElementById('modalSizeHint').textContent =
-    `Size available at this price: $${size}. Bigger stakes go to the market maker for approval.`;
+  if ((player.mode || 'algo') === 'finite') {
+    document.getElementById('modalSizeHint').textContent =
+      `Size available: $${size}. In manual mode, bets larger than this are not accepted.`;
+  } else {
+    document.getElementById('modalSizeHint').textContent =
+      `Size available at this price: $${size}. Bigger stakes go to the market maker for approval.`;
+  }
   document.getElementById('modalError').textContent = '';
   const savedName = localStorage.getItem('bettorName') || '';
   document.getElementById('betName').value = savedName;
@@ -224,14 +268,30 @@ async function loadMyBets(opts = {}) {
   body.innerHTML = '';
   noBets.classList.add('hidden');
   errEl.classList.add('hidden');
-  if (!name) return;
-  const res = await fetch(gq('/api/bets') + '&bettorName=' + encodeURIComponent(name) + '&pin=' + encodeURIComponent(pin));
-  if (res.status === 401) {
+  if (!name) {
+    renderInvitations([]);
+    return;
+  }
+
+  // Fetch invitations (finite mode "you're up" notices) in parallel with bets
+  const [invRes, betsRes] = await Promise.all([
+    fetch(gq('/api/invitations') + '&bettorName=' + encodeURIComponent(name) + '&pin=' + encodeURIComponent(pin)).catch(() => null),
+    fetch(gq('/api/bets') + '&bettorName=' + encodeURIComponent(name) + '&pin=' + encodeURIComponent(pin))
+  ]);
+
+  // Render invitations
+  if (invRes && invRes.ok) {
+    renderInvitations(await invRes.json());
+  } else {
+    renderInvitations([]);
+  }
+
+  if (betsRes.status === 401) {
     if (!opts.silent) errEl.classList.remove('hidden');
     return;
   }
-  const bets = await res.json();
-  if (!res.ok) return;
+  const bets = await betsRes.json();
+  if (!betsRes.ok) return;
   localStorage.setItem('bettorPin', pin);
   if (bets.length === 0) {
     noBets.classList.remove('hidden');
@@ -241,7 +301,12 @@ async function loadMyBets(opts = {}) {
     const tr = document.createElement('tr');
     let line = '—';
     if (b.status === 'countered' && b.counterPrice) {
-      line = `${b.side === 'under' ? b.counterPrice.bid : b.counterPrice.offer} <em style="color:var(--amber);font-size:11px;">counter</em>`;
+      // Show original request and counter clearly so the delta is visible
+      const reqLevel = b.requestedPrice
+        ? (b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer)
+        : '?';
+      const ctrLevel = b.side === 'under' ? b.counterPrice.bid : b.counterPrice.offer;
+      line = `<div style="font-size:11px; color:#9ca3af; line-height:1.5;">Req: ${reqLevel}</div><div style="font-size:13px; font-weight:700; color:#92400e; line-height:1.5;">↳ Counter: ${ctrLevel}</div>`;
     } else if (b.price) {
       line = b.side === 'under' ? b.price.bid : b.price.offer;
     } else if (b.requestedPrice) {
@@ -269,6 +334,63 @@ async function loadMyBets(opts = {}) {
   });
 }
 
+function renderInvitations(invitations) {
+  const section = document.getElementById('invitationsSection');
+  const list = document.getElementById('invitationsList');
+  if (!section || !list) return;
+  if (!invitations || invitations.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+  list.innerHTML = invitations.map(inv => {
+    const level = inv.side === 'under' ? inv.currentBid : inv.currentOffer;
+    const remaining = inv.side === 'under' ? inv.bidSize : inv.offerSize;
+    const sideHtml = inv.side === 'under'
+      ? `<span style="color:var(--red); font-weight:700;">⬇ Under @ ${level}</span>`
+      : `<span style="color:var(--green); font-weight:700;">⬆ Over @ ${level}</span>`;
+    return `
+      <div style="display:flex; align-items:center; gap:12px; padding:10px 12px; background:#f5f3ff; border:1px solid #ede9fe; border-radius:8px; margin-bottom:6px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:160px;">
+          <div style="font-size:13px; font-weight:600;">${escapeHtml(inv.playerName)}: ${sideHtml}</div>
+          <div style="font-size:11px; color:#9ca3af; margin-top:2px;">$${remaining} available now</div>
+        </div>
+        <button class="btn" style="padding:4px 16px; font-size:13px;" onclick="betFromInvitation('${inv.playerId}', '${inv.side}')">Bet now →</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function betFromInvitation(playerId, side) {
+  const player = players.find(p => p.id === playerId);
+  if (!player || player.status !== 'open') {
+    showToast('Market is not currently open — refresh the page.');
+    return;
+  }
+  openModal(playerId, side);
+}
+
+async function registerInterest(playerId, side) {
+  // Use the name already selected in the My Bets dropdown, or fall back to localStorage
+  const myNameEl = document.getElementById('myName');
+  const name = (myNameEl && myNameEl.value.trim()) || localStorage.getItem('bettorName') || '';
+  if (!name) {
+    showToast('Select your name in "My Bets" first.');
+    return;
+  }
+  const res = await fetch(gq(`/api/players/${playerId}/ping`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bettorName: name, side })
+  });
+  const data = await res.json();
+  if (res.ok) {
+    showToast("Noted — we'll let you know when liquidity is back.");
+  } else {
+    showToast(data.error || 'Could not register interest.');
+  }
+}
+
 async function answerCounter(betId, action) {
   const pin = document.getElementById('myPin').value.trim();
   const endpoint = action === 'accept' ? 'accept-counter' : 'decline-counter';
@@ -292,7 +414,13 @@ async function answerCounter(betId, action) {
 (async () => {
   await loadBettors();
   await loadPlayers();
-  setInterval(loadPlayers, 5000);
+  // Poll players every 5s; also silently refresh My Bets (which loads invitations) if a name is selected
+  setInterval(() => {
+    loadPlayers();
+    if (document.getElementById('myName') && document.getElementById('myName').value) {
+      loadMyBets({ silent: true });
+    }
+  }, 5000);
   const savedName = localStorage.getItem('bettorName');
   const savedPin = localStorage.getItem('bettorPin') || '';
   document.getElementById('myPin').value = savedPin;

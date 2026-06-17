@@ -159,6 +159,16 @@
         <tbody id="pendingBody"></tbody>
       </table>
       <div id="noPending" class="small">No pending requests.</div>
+      <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
+        <div style="font-size:11px; color:var(--grey); font-weight:700; letter-spacing:0.06em; margin-bottom:8px;">INTEREST QUEUE <span class="small" style="font-weight:400; letter-spacing:0;">(manual-mode bettors waiting for liquidity)</span></div>
+        <table id="pingQueueTable" class="hidden">
+          <thead>
+            <tr><th>Player</th><th>Bettor</th><th>Side</th><th>Registered</th><th>Status</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="pingQueueBody"></tbody>
+        </table>
+        <div id="noPings" class="small">No interest registered.</div>
+      </div>
     </div>
 
     <div class="section-title">Exposure</div>
@@ -245,11 +255,19 @@
 
     <div class="section-title">Live Market Runs</div>
     <div class="card">
-      <p class="small">Copy and paste into an email to share current markets with bettors. Updates live as markets change.</p>
-      <div id="marketRunsTable" style="font-family:monospace; font-size:13px; white-space:pre; background:#f8f8f8; border-radius:6px; padding:12px 16px; margin-bottom:10px; overflow-x:auto; line-height:1.7;"></div>
-      <div style="display:flex; align-items:center; gap:10px;">
-        <button class="btn secondary" onclick="copyMarketRuns()">📋 Copy to clipboard</button>
-        <span id="copyConfirm" class="small hidden" style="color:var(--green);">✓ Copied!</span>
+      <div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap;">
+        <div style="flex:2; min-width:220px;">
+          <p class="small">Copy and paste into an email to share current markets with bettors. Updates live as markets change.</p>
+          <div id="marketRunsTable" style="font-family:monospace; font-size:13px; white-space:pre; background:#f8f8f8; border-radius:6px; padding:12px 16px; margin-bottom:10px; overflow-x:auto; line-height:1.7;"></div>
+          <div style="display:flex; align-items:center; gap:10px;">
+            <button class="btn secondary" onclick="copyMarketRuns()">📋 Copy to clipboard</button>
+            <span id="copyConfirm" class="small hidden" style="color:var(--green);">✓ Copied!</span>
+          </div>
+        </div>
+        <div style="flex:1; min-width:200px; border-left:1px solid var(--border); padding-left:20px;">
+          <div style="font-size:11px; color:var(--grey); font-weight:700; letter-spacing:0.06em; margin-bottom:12px;">MARKET MODES</div>
+          <div id="marketModeControls"><div class="small">No open markets.</div></div>
+        </div>
       </div>
     </div>
 
@@ -642,6 +660,8 @@ async function loadPlayers() {
   players = await res.json();
   renderPlayers();
   renderMarketRuns();
+  renderMarketModeControls();
+  renderPingQueue();
 }
 
 function renderPlayers() {
@@ -1124,6 +1144,151 @@ async function copyMarketRuns() {
   } catch (e) {
     showToast('Could not copy — try selecting and copying manually.');
   }
+}
+
+// ---------- market mode controls (right side of Market Runs card) ----------
+
+function renderMarketModeControls() {
+  const el = document.getElementById('marketModeControls');
+  if (!el) return;
+  const open = players.filter(p => p.status === 'open' || p.status === 'paused');
+  if (open.length === 0) {
+    el.innerHTML = '<div class="small">No open markets.</div>';
+    return;
+  }
+  el.innerHTML = open.map(p => {
+    const isManual = (p.mode || 'algo') === 'finite';
+    return `
+      <div style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
+        <div style="font-size:12px; font-weight:600; margin-bottom:6px;">${escapeHtml(p.name)}</div>
+        <div style="display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;">
+          <div style="display:flex; gap:10px; align-items:center;">
+            <label style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer; white-space:nowrap;">
+              <input type="radio" name="mode-${p.id}" value="algo" ${!isManual ? 'checked' : ''} onchange="setPlayerMode('${p.id}', 'algo')" />
+              Algo
+            </label>
+            <label style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer; white-space:nowrap;">
+              <input type="radio" name="mode-${p.id}" value="finite" ${isManual ? 'checked' : ''} onchange="setPlayerMode('${p.id}', 'finite')" />
+              Manual
+            </label>
+          </div>
+          ${isManual ? `
+            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+              <div>
+                <div style="font-size:10px; color:var(--red); font-weight:700; margin-bottom:2px;">BID CAP ($)</div>
+                <input type="number" min="0" step="1" value="${p.bidSize}" style="width:64px; font-size:12px;" id="finite-bid-${p.id}" onchange="saveFiniteCapacity('${p.id}')" />
+              </div>
+              <div>
+                <div style="font-size:10px; color:var(--green); font-weight:700; margin-bottom:2px;">OFFER CAP ($)</div>
+                <input type="number" min="0" step="1" value="${p.offerSize}" style="width:64px; font-size:12px;" id="finite-offer-${p.id}" onchange="saveFiniteCapacity('${p.id}')" />
+              </div>
+            </div>
+          ` : ''}
+        </div>
+        ${isManual ? `
+          <div class="small" style="margin-top:5px; color:#9ca3af;">
+            Re-racking (updating caps) clears any outstanding invitations — bettors must re-ping.
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+async function setPlayerMode(playerId, mode) {
+  const res = await adminFetch(gg(`/api/players/${playerId}`), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode })
+  });
+  if (!res.ok) { showToast('Could not update mode.'); return; }
+  showToast(mode === 'finite' ? 'Manual mode on — set bid/offer caps.' : 'Algo mode on.');
+  await loadAll();
+}
+
+async function saveFiniteCapacity(playerId) {
+  const bidEl = document.getElementById(`finite-bid-${playerId}`);
+  const offerEl = document.getElementById(`finite-offer-${playerId}`);
+  const body = {};
+  if (bidEl) body.bidSize = Number(bidEl.value);
+  if (offerEl) body.offerSize = Number(offerEl.value);
+  const res = await adminFetch(gg(`/api/players/${playerId}`), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (res.ok) {
+    showToast('Caps saved. Invited pings for updated sides cleared.');
+    await loadAll();
+  } else {
+    showToast('Save failed.');
+  }
+}
+
+// ---------- interest queue (ping management) ----------
+
+function renderPingQueue() {
+  const body = document.getElementById('pingQueueBody');
+  const tableEl = document.getElementById('pingQueueTable');
+  const noPings = document.getElementById('noPings');
+  if (!body) return;
+  body.innerHTML = '';
+
+  // Collect all pings from all players, enriched with player info
+  const allPings = [];
+  players.forEach(p => {
+    if (Array.isArray(p.pings)) {
+      p.pings.forEach(pg => {
+        allPings.push({ ...pg, playerName: p.name, playerId: p.id });
+      });
+    }
+  });
+  // Oldest first = head of the queue
+  allPings.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+  if (allPings.length === 0) {
+    tableEl.classList.add('hidden');
+    noPings.classList.remove('hidden');
+    return;
+  }
+  tableEl.classList.remove('hidden');
+  noPings.classList.add('hidden');
+
+  allPings.forEach(pg => {
+    const tr = document.createElement('tr');
+    const isInvited = pg.status === 'invited';
+    const sideHtml = pg.side === 'under'
+      ? '<span style="color:var(--red); font-weight:700;">⬇ Under</span>'
+      : '<span style="color:var(--green); font-weight:700;">⬆ Over</span>';
+    tr.innerHTML = `
+      <td>${escapeHtml(pg.playerName)}</td>
+      <td>${escapeHtml(pg.bettorName)}</td>
+      <td>${sideHtml}</td>
+      <td style="font-size:11px;">${new Date(pg.timestamp).toLocaleString()}</td>
+      <td><span class="badge ${isInvited ? 'open' : 'pending'}">${isInvited ? 'invited' : 'waiting'}</span></td>
+      <td>
+        <div style="display:flex; gap:4px; flex-wrap:wrap;">
+          ${!isInvited ? `<button class="btn secondary" style="padding:2px 10px; font-size:12px;" onclick="invitePing('${pg.playerId}', '${pg.id}')">Invite</button>` : ''}
+          <button class="btn danger" style="padding:2px 10px; font-size:12px;" onclick="removePing('${pg.playerId}', '${pg.id}')">Remove</button>
+        </div>
+      </td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+async function invitePing(playerId, pingId) {
+  const res = await adminFetch(gg(`/api/admin/players/${playerId}/pings/${pingId}/invite`), { method: 'POST' });
+  if (!res.ok) { showToast('Could not invite.'); return; }
+  showToast('Bettor invited — they will see it under My Bets.');
+  await loadAll();
+}
+
+async function removePing(playerId, pingId) {
+  const res = await adminFetch(gg(`/api/admin/players/${playerId}/pings/${pingId}`), { method: 'DELETE' });
+  if (!res.ok) { showToast('Remove failed.'); return; }
+  showToast('Removed from queue.');
+  await loadAll();
 }
 
 // ---------- bets ----------
