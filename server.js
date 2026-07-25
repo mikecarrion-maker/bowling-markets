@@ -245,13 +245,149 @@ function fillBet(player, side, stake, settings) {
   }
 }
 
+// ---------- auth ----------
+
+// Constant-time string compare. Avoids leaking how much of a secret matched
+// via response timing. Lengths are compared first because timingSafeEqual
+// throws on mismatched buffer lengths.
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a || ''), 'utf8');
+  const bufB = Buffer.from(String(b || ''), 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+// In-memory failed-attempt tracking, keyed by IP + purpose. A 4-digit PIN is
+// only 10k guesses, so without this it falls to a script in seconds.
+// Note: this is per-process. With multiple Render instances each gets its own
+// counter; fine for a single free-tier instance, revisit if you scale out.
+const FAIL_WINDOW_MS = 15 * 60 * 1000;
+const MAX_FAILS = 8;
+const failures = new Map();
+
+function clientKey(req, purpose) {
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const ip = fwd || req.socket.remoteAddress || 'unknown';
+  return `${purpose}:${ip}`;
+}
+
+function isLockedOut(req, purpose) {
+  const rec = failures.get(clientKey(req, purpose));
+  if (!rec) return false;
+  if (Date.now() - rec.first > FAIL_WINDOW_MS) {
+    failures.delete(clientKey(req, purpose));
+    return false;
+  }
+  return rec.count >= MAX_FAILS;
+}
+
+function recordFailure(req, purpose) {
+  const key = clientKey(req, purpose);
+  const rec = failures.get(key);
+  if (!rec || Date.now() - rec.first > FAIL_WINDOW_MS) {
+    failures.set(key, { count: 1, first: Date.now() });
+  } else {
+    rec.count++;
+  }
+}
+
+function clearFailures(req, purpose) {
+  failures.delete(clientKey(req, purpose));
+}
+
+// The admin passcode comes from the environment first so it never has to live
+// in the database blob. settings.adminPasscode stays supported for existing
+// deployments, but ADMIN_PASSCODE wins if both are set.
+function adminPasscodeFor(data) {
+  return process.env.ADMIN_PASSCODE || data.settings.adminPasscode || '';
+}
+
+// Session cookie so the /admin page itself can be gated. A browser navigating
+// to /admin cannot send a custom header, so the passcode is exchanged for a
+// signed cookie at POST /api/admin/login.
+function sessionSecret(data) {
+  if (!data.settings.sessionSecret) {
+    data.settings.sessionSecret = crypto.randomBytes(32).toString('hex');
+  }
+  return data.settings.sessionSecret;
+}
+
+function adminToken(data) {
+  return crypto.createHmac('sha256', sessionSecret(data))
+    .update(`admin:${adminPasscodeFor(data)}`)
+    .digest('hex');
+}
+
+function parseCookies(req) {
+  const out = {};
+  String(req.headers.cookie || '').split(';').forEach(part => {
+    const idx = part.indexOf('=');
+    if (idx === -1) return;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  });
+  return out;
+}
+
+function hasAdminCookie(req, data) {
+  const token = parseCookies(req).bm_admin;
+  return !!token && safeEqual(token, adminToken(data));
+}
+
+// FAILS CLOSED. An unset passcode used to mean "admin is open to everyone",
+// which left every admin endpoint public on a live deployment.
 async function requireAdmin(req, res, next) {
   const data = await loadData();
-  const passcode = data.settings.adminPasscode || '';
-  if (!passcode) return next(); // not configured yet - admin is open
+  const passcode = adminPasscodeFor(data);
+
+  if (!passcode) {
+    return res.status(503).json({
+      error: 'Admin is locked: no passcode configured. Set ADMIN_PASSCODE in the server environment and restart.'
+    });
+  }
+  if (isLockedOut(req, 'admin')) {
+    return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
+  }
+  if (hasAdminCookie(req, data)) return next();
+
   const provided = req.headers['x-admin-passcode'] || '';
-  if (provided && provided === passcode) return next();
+  if (provided && safeEqual(provided, passcode)) {
+    clearFailures(req, 'admin');
+    return next();
+  }
+
+  recordFailure(req, 'admin');
   return res.status(401).json({ error: 'admin passcode required' });
+}
+
+// Resolve and authenticate a bettor from request headers. Returns
+// { ok: true, bettor } or { ok: false, status, error }.
+// Callers MUST use this rather than trusting a name off the query string.
+function authenticateBettor(req, group) {
+  const rawName = req.headers['x-bettor-name'];
+  const name = rawName == null ? '' : String(rawName).trim();
+  if (!name) return { ok: false, status: 401, error: 'sign in to view your bets' };
+
+  const bettor = group.bettors.find(b => b.name.toLowerCase() === name.toLowerCase());
+  if (!bettor) return { ok: false, status: 401, error: 'unknown bettor' };
+
+  if (isLockedOut(req, 'bettor')) {
+    return { ok: false, status: 429, error: 'Too many failed attempts. Try again in 15 minutes.' };
+  }
+
+  // A bettor with no PIN set cannot be authenticated at all — deny rather than
+  // waving them through, and surface it so the market maker sets one.
+  if (!bettor.pin) {
+    return { ok: false, status: 403, error: 'no PIN set for this bettor — ask the market maker to set one' };
+  }
+
+  const provided = req.headers['x-bettor-pin'];
+  if (!safeEqual(provided == null ? '' : String(provided), bettor.pin)) {
+    recordFailure(req, 'bettor');
+    return { ok: false, status: 401, error: 'incorrect pin' };
+  }
+
+  clearFailures(req, 'bettor');
+  return { ok: true, bettor };
 }
 
 function sortedBettorNames(group) {
@@ -612,22 +748,24 @@ app.get('/api/admin/summary', requireAdmin, async (req, res) => {
 
 // ---------- bets ----------
 
+// A bettor's own bets. Always scoped to the authenticated bettor.
+//
+// This previously applied the PIN check only when ?bettorName was supplied,
+// so calling it with no parameters returned the entire book — every bettor's
+// name, side and stake — to anyone with the URL. The identity now comes from
+// authenticated headers and the filter is unconditional; there is no code path
+// that returns another bettor's positions. Admin uses /api/admin/bets.
 app.get('/api/bets', async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
-  let bets = group.bets;
+
+  const auth = authenticateBettor(req, group);
+  if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+  const mine = auth.bettor.name.toLowerCase();
+  let bets = group.bets.filter(b => b.bettorName.toLowerCase() === mine);
   if (req.query.playerId) bets = bets.filter(b => b.playerId === req.query.playerId);
-  if (req.query.bettorName) {
-    const name = String(req.query.bettorName);
-    const bettor = group.bettors.find(b => b.name.toLowerCase() === name.toLowerCase());
-    if (bettor && bettor.pin) {
-      const providedPin = req.query.pin == null ? '' : String(req.query.pin);
-      if (providedPin !== bettor.pin) {
-        return res.status(401).json({ error: 'incorrect pin' });
-      }
-    }
-    bets = bets.filter(b => b.bettorName.toLowerCase() === name.toLowerCase());
-  }
+
   bets = [...bets].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   const playerNames = Object.fromEntries(group.players.map(p => [p.id, p.name]));
   res.json(bets.map(b => ({ ...b, playerName: playerNames[b.playerId] || '?' })));
@@ -654,21 +792,20 @@ app.get('/api/admin/pending', requireAdmin, async (req, res) => {
 app.post('/api/bets', async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
-  const { playerId, bettorName, side, stake } = req.body;
+  const { playerId, side, stake } = req.body;
 
-  if (!playerId || !bettorName || !side || stake == null) {
-    return res.status(400).json({ error: 'playerId, bettorName, side and stake are required' });
+  // The bettor's identity comes from their authenticated PIN, not from the
+  // request body. Previously any caller could submit a bet under someone
+  // else's name and that person would be on the hook for the stake.
+  const auth = authenticateBettor(req, group);
+  if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+  const canonicalName = auth.bettor.name;
+
+  if (!playerId || !side || stake == null) {
+    return res.status(400).json({ error: 'playerId, side and stake are required' });
   }
   if (side !== 'over' && side !== 'under') {
     return res.status(400).json({ error: "side must be 'over' or 'under'" });
-  }
-  let canonicalName = String(bettorName).trim();
-  if (group.bettors.length > 0) {
-    const match = group.bettors.find(b => b.name.toLowerCase() === canonicalName.toLowerCase());
-    if (!match) {
-      return res.status(400).json({ error: 'select your name from the bettors list' });
-    }
-    canonicalName = match.name;
   }
   const stakeNum = Number(stake);
   if (!(stakeNum > 0)) {
@@ -794,10 +931,12 @@ app.post('/api/bets/:id/accept-counter', async (req, res) => {
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'countered') return res.status(400).json({ error: 'bet is not countered' });
 
-  const bettor = group.bettors.find(b => b.name.toLowerCase() === bet.bettorName.toLowerCase());
-  if (bettor && bettor.pin) {
-    const providedPin = req.body.pin == null ? '' : String(req.body.pin);
-    if (providedPin !== bettor.pin) return res.status(401).json({ error: 'incorrect pin' });
+  // Authenticate, then confirm the caller actually owns this bet — otherwise
+  // any signed-in bettor could accept someone else's counter.
+  const auth = authenticateBettor(req, group);
+  if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+  if (auth.bettor.name.toLowerCase() !== bet.bettorName.toLowerCase()) {
+    return res.status(403).json({ error: 'not your bet' });
   }
 
   const player = group.players.find(p => p.id === bet.playerId);
@@ -819,10 +958,10 @@ app.post('/api/bets/:id/decline-counter', async (req, res) => {
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'countered') return res.status(400).json({ error: 'bet is not countered' });
 
-  const bettor = group.bettors.find(b => b.name.toLowerCase() === bet.bettorName.toLowerCase());
-  if (bettor && bettor.pin) {
-    const providedPin = req.body.pin == null ? '' : String(req.body.pin);
-    if (providedPin !== bettor.pin) return res.status(401).json({ error: 'incorrect pin' });
+  const auth = authenticateBettor(req, group);
+  if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+  if (auth.bettor.name.toLowerCase() !== bet.bettorName.toLowerCase()) {
+    return res.status(403).json({ error: 'not your bet' });
   }
 
   bet.status = 'declined';
@@ -861,16 +1000,13 @@ app.post('/api/players/:id/ping', async (req, res) => {
     return res.status(400).json({ error: 'market is not open' });
   }
 
-  const { bettorName, side } = req.body;
-  if (!bettorName || !side) return res.status(400).json({ error: 'bettorName and side are required' });
+  const { side } = req.body;
+  if (!side) return res.status(400).json({ error: 'side is required' });
   if (side !== 'over' && side !== 'under') return res.status(400).json({ error: "side must be 'over' or 'under'" });
 
-  let canonicalName = String(bettorName).trim();
-  if (group.bettors.length > 0) {
-    const match = group.bettors.find(b => b.name.toLowerCase() === canonicalName.toLowerCase());
-    if (!match) return res.status(400).json({ error: 'select your name from the bettors list' });
-    canonicalName = match.name;
-  }
+  const auth = authenticateBettor(req, group);
+  if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+  const canonicalName = auth.bettor.name;
 
   const remaining = side === 'under' ? player.bidSize : player.offerSize;
   if (remaining > 0) {
@@ -902,15 +1038,10 @@ app.post('/api/players/:id/ping', async (req, res) => {
 app.get('/api/invitations', async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
-  const bettorName = req.query.bettorName;
-  if (!bettorName) return res.json([]);
 
-  // PIN check (same as /api/bets)
-  const bettor = group.bettors.find(b => b.name.toLowerCase() === bettorName.toLowerCase());
-  if (bettor && bettor.pin) {
-    const providedPin = req.query.pin == null ? '' : String(req.query.pin);
-    if (providedPin !== bettor.pin) return res.status(401).json({ error: 'incorrect pin' });
-  }
+  const auth = authenticateBettor(req, group);
+  if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+  const bettorName = auth.bettor.name;
 
   const invitations = [];
   group.players.forEach(p => {
@@ -966,9 +1097,93 @@ app.delete('/api/admin/players/:id/pings/:pingId', requireAdmin, async (req, res
 
 // ---------- pages ----------
 
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'admin.html'));
+// Exchange the passcode for a signed session cookie. A browser navigating to
+// /admin cannot attach a custom header, so the page gate needs a cookie.
+app.post('/api/admin/login', async (req, res) => {
+  const data = await loadData();
+  const passcode = adminPasscodeFor(data);
+  if (!passcode) {
+    return res.status(503).json({ error: 'Admin is locked: no passcode configured. Set ADMIN_PASSCODE in the server environment.' });
+  }
+  if (isLockedOut(req, 'admin')) {
+    return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
+  }
+  if (!safeEqual(req.body && req.body.passcode, passcode)) {
+    recordFailure(req, 'admin');
+    return res.status(401).json({ error: 'incorrect passcode' });
+  }
+  clearFailures(req, 'admin');
+
+  const token = adminToken(data);
+  await saveData(data); // persists sessionSecret on first login
+  const secure = process.env.NODE_ENV === 'production' ? ' Secure;' : '';
+  res.setHeader('Set-Cookie',
+    `bm_admin=${token}; HttpOnly; SameSite=Strict; Path=/;${secure} Max-Age=${12 * 60 * 60}`);
+  res.json({ ok: true });
 });
+
+app.post('/api/admin/logout', (req, res) => {
+  res.setHeader('Set-Cookie', 'bm_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+  res.json({ ok: true });
+});
+
+// The dashboard HTML is no longer served to anonymous visitors. Previously
+// anyone with the URL got the full market-maker page.
+app.get('/admin', async (req, res) => {
+  const data = await loadData();
+  const passcode = adminPasscodeFor(data);
+
+  if (!passcode) {
+    return res.status(503).send(lockedPage(
+      'Admin is locked',
+      'No passcode is configured. Set <code>ADMIN_PASSCODE</code> in the server environment and restart.'
+    ));
+  }
+  if (hasAdminCookie(req, data)) {
+    return res.sendFile(path.join(__dirname, 'admin.html'));
+  }
+  return res.status(401).send(loginPage());
+});
+
+function lockedPage(title, message) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;max-width:26rem;margin:15vh auto;padding:0 1rem;color:#222}
+h1{font-size:1.25rem}code{background:#f1f1f1;padding:.1rem .3rem;border-radius:3px}</style>
+</head><body><h1>${title}</h1><p>${message}</p></body></html>`;
+}
+
+function loginPage() {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Market maker sign in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;max-width:22rem;margin:15vh auto;padding:0 1rem;color:#222}
+h1{font-size:1.25rem}input,button{font-size:1rem;padding:.55rem;width:100%;box-sizing:border-box;margin-top:.5rem}
+button{cursor:pointer;background:#111;color:#fff;border:0;border-radius:4px}
+.err{color:#b00020;margin-top:.75rem;min-height:1.2em;font-size:.9rem}</style>
+</head><body>
+<h1>Market maker sign in</h1>
+<form id="f" autocomplete="off">
+  <input type="password" id="p" placeholder="Passcode" autofocus aria-label="Passcode" />
+  <button type="submit">Sign in</button>
+</form>
+<div class="err" id="e"></div>
+<script>
+document.getElementById('f').addEventListener('submit', async function (ev) {
+  ev.preventDefault();
+  var e = document.getElementById('e');
+  e.textContent = '';
+  var r = await fetch('/api/admin/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ passcode: document.getElementById('p').value })
+  });
+  if (r.ok) { location.reload(); return; }
+  var d = await r.json().catch(function () { return {}; });
+  e.textContent = d.error || 'Sign in failed.';
+});
+</script>
+</body></html>`;
+}
 
 app.listen(PORT, () => {
   console.log(`Bowling markets app running at http://localhost:${PORT}`);
