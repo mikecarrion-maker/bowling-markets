@@ -459,6 +459,52 @@ function exposureRows(group) {
   return { rows, totals };
 }
 
+// Per-bettor exposure: counterparty risk, i.e. who owes whom at the end of the
+// night. exposureRows() above is score risk per bowler; this is the other axis.
+//
+// For each bettor, from Mike's (the house's) point of view:
+//   openStake      - money they currently have live across all open bets
+//   netIfUnders    - net if all their OPEN unders come in (unders win, overs lose):
+//                    + = the house owes them, - = they owe the house
+//   netIfOvers     - net if all their OPEN overs come in
+//   settledBalance - realised P&L to date across already-graded bets; this is the
+//                    running number Mike squares up from. + = house owes them.
+// Payouts are even money, so a won bet nets +stake to the bettor, a lost bet
+// -stake, and push/void/cancel net 0 (stake returned).
+function bettorExposureRows(group) {
+  const names = new Set(group.bettors.map(b => b.name));
+  group.bets.forEach(b => names.add(b.bettorName));
+
+  const SETTLED = ['won', 'lost', 'push', 'voided', 'cancelled'];
+  const rows = [...names].map(name => {
+    const lc = name.toLowerCase();
+    const mine = group.bets.filter(b => b.bettorName.toLowerCase() === lc);
+    const open = mine.filter(b => b.status === 'open');
+    const underStakes = round2(open.filter(b => b.side === 'under').reduce((s, b) => s + b.stake, 0));
+    const overStakes  = round2(open.filter(b => b.side === 'over').reduce((s, b) => s + b.stake, 0));
+    const openStake   = round2(underStakes + overStakes);
+    const netIfUnders = round2(underStakes - overStakes);
+    const netIfOvers  = round2(overStakes - underStakes);
+    const settledBalance = round2(mine
+      .filter(b => SETTLED.includes(b.status))
+      .reduce((s, b) => s + ((b.payout == null ? 0 : b.payout) - b.stake), 0));
+    return { name, openStake, underStakes, overStakes, netIfUnders, netIfOvers, settledBalance };
+  })
+  // Hide bettors with nothing live and nothing settled — keeps the table to
+  // people actually in action.
+  .filter(r => r.openStake !== 0 || r.settledBalance !== 0)
+  .sort((a, b) => a.name.localeCompare(b.name));
+
+  const totals = rows.reduce((acc, r) => ({
+    openStake:      round2(acc.openStake + r.openStake),
+    netIfUnders:    round2(acc.netIfUnders + r.netIfUnders),
+    netIfOvers:     round2(acc.netIfOvers + r.netIfOvers),
+    settledBalance: round2(acc.settledBalance + r.settledBalance)
+  }), { openStake: 0, netIfUnders: 0, netIfOvers: 0, settledBalance: 0 });
+
+  return { rows, totals };
+}
+
 // ---------- public status ----------
 
 app.get('/api/admin/status', async (req, res) => {
@@ -749,6 +795,13 @@ app.get('/api/admin/exposure', requireAdmin, async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
   res.json(exposureRows(group));
+});
+
+// Per-bettor exposure (counterparty risk / who owes whom).
+app.get('/api/admin/bettor-exposure', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  res.json(bettorExposureRows(group));
 });
 
 // Combined summary across both groups
@@ -1225,4 +1278,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, gradeBet, exposureRows, normalize, defaultData };
+module.exports = { app, gradeBet, exposureRows, bettorExposureRows, normalize, defaultData };

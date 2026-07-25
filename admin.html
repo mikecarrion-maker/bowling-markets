@@ -187,6 +187,17 @@
       </table>
     </div>
 
+    <div style="font-size:11px; color:var(--grey); font-weight:700; letter-spacing:0.06em; margin:18px 0 8px;">BY BETTOR <span class="small" style="font-weight:400; letter-spacing:0;">(counterparty risk &mdash; who owes whom at the end of the night)</span></div>
+    <div class="card" style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr><th>Bettor</th><th>Open stake</th><th>Net if their unders come in</th><th>Net if their overs come in</th><th>Settled balance</th></tr>
+        </thead>
+        <tbody id="bettorExposureBody"></tbody>
+        <tfoot id="bettorExposureFoot"></tfoot>
+      </table>
+    </div>
+
     <div class="section-title">Add Player / Market</div>
     <div class="card">
       <div class="form-row">
@@ -1048,6 +1059,48 @@ async function loadExposure() {
       <div class="small">Worst case (all high)</div>
       <div style="${valStyle(t.netIfHigh)}">$${t.netIfHigh}</div>
     </div>
+  `;
+
+  await loadBettorExposure();
+}
+
+// Per-bettor exposure: counterparty risk. Settled balance is the running number
+// Mike squares up from (positive = the house owes that bettor).
+async function loadBettorExposure() {
+  const body = document.getElementById('bettorExposureBody');
+  const foot = document.getElementById('bettorExposureFoot');
+  if (!body || !foot) return;
+  const res = await adminFetch(gg('/api/admin/bettor-exposure'));
+  const data = await res.json();
+  body.innerHTML = '';
+  foot.innerHTML = '';
+
+  const signed = (v) => `<td class="exposure-net ${v >= 0 ? 'positive' : 'negative'}">$${v}</td>`;
+
+  if (!data.rows || data.rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="5" class="small">No bettor activity yet.</td></tr>';
+    return;
+  }
+  data.rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(r.name)}</td>
+      <td>$${r.openStake}</td>
+      ${signed(r.netIfUnders)}
+      ${signed(r.netIfOvers)}
+      ${signed(r.settledBalance)}
+    `;
+    body.appendChild(tr);
+  });
+  const t = data.totals;
+  foot.innerHTML = `
+    <tr style="font-weight:600;">
+      <td>Total</td>
+      <td>$${t.openStake}</td>
+      ${signed(t.netIfUnders)}
+      ${signed(t.netIfOvers)}
+      ${signed(t.settledBalance)}
+    </tr>
   `;
 }
 
