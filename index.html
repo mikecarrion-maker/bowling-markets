@@ -26,7 +26,8 @@
 <body>
 <header>
   <h1>🎳 Bowling Tournament Markets</h1>
-  <nav><a href="/admin">Market Maker Dashboard →</a></nav>
+  <!-- The market maker dashboard is deliberately not linked from the bettor
+       view. It lives at /admin and requires the passcode. -->
 </header>
 
 <main>
@@ -104,6 +105,16 @@ const groupId = new URLSearchParams(location.search).get('g') || 'la';
 function gq(url) {
   const sep = url.includes('?') ? '&' : '?';
   return url + sep + 'g=' + groupId;
+}
+
+// Bettor credentials travel as headers, never in the query string — a URL with
+// ?pin=1234 ends up in server logs, browser history and referrer headers.
+function bettorHeaders(extra) {
+  const nameEl = document.getElementById('myName');
+  const pinEl = document.getElementById('myPin');
+  const name = (nameEl && nameEl.value.trim()) || localStorage.getItem('bettorName') || '';
+  const pin = (pinEl && pinEl.value.trim()) || localStorage.getItem('bettorPin') || '';
+  return Object.assign({ 'X-Bettor-Name': name, 'X-Bettor-Pin': pin }, extra || {});
 }
 
 let players = [];
@@ -225,12 +236,21 @@ async function submitBet() {
   if (!name) { errEl.textContent = 'Enter your name.'; return; }
   if (!(stake > 0)) { errEl.textContent = 'Enter a stake greater than 0.'; return; }
 
+  const storedPin = (document.getElementById('myPin').value.trim()) || localStorage.getItem('bettorPin') || '';
+  if (!storedPin) {
+    errEl.textContent = 'Enter your PIN in "My Bets" below before placing a bet.';
+    return;
+  }
+
   const res = await fetch(gq('/api/bets'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Bettor-Name': name,
+      'X-Bettor-Pin': storedPin
+    },
     body: JSON.stringify({
       playerId: pendingBet.playerId,
-      bettorName: name,
       side: pendingBet.side,
       stake
     })
@@ -240,6 +260,7 @@ async function submitBet() {
     errEl.textContent = data.error || 'Something went wrong.';
     return;
   }
+  localStorage.setItem('bettorPin', storedPin);
   localStorage.setItem('bettorName', name);
   const side = pendingBet.side === 'under' ? 'under' : 'over';
   const player = pendingBet.player;
@@ -274,9 +295,10 @@ async function loadMyBets(opts = {}) {
   }
 
   // Fetch invitations (finite mode "you're up" notices) in parallel with bets
+  const headers = bettorHeaders();
   const [invRes, betsRes] = await Promise.all([
-    fetch(gq('/api/invitations') + '&bettorName=' + encodeURIComponent(name) + '&pin=' + encodeURIComponent(pin)).catch(() => null),
-    fetch(gq('/api/bets') + '&bettorName=' + encodeURIComponent(name) + '&pin=' + encodeURIComponent(pin))
+    fetch(gq('/api/invitations'), { headers }).catch(() => null),
+    fetch(gq('/api/bets'), { headers })
   ]);
 
   // Render invitations
@@ -380,8 +402,8 @@ async function registerInterest(playerId, side) {
   }
   const res = await fetch(gq(`/api/players/${playerId}/ping`), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bettorName: name, side })
+    headers: bettorHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ side })
   });
   const data = await res.json();
   if (res.ok) {
@@ -392,12 +414,11 @@ async function registerInterest(playerId, side) {
 }
 
 async function answerCounter(betId, action) {
-  const pin = document.getElementById('myPin').value.trim();
   const endpoint = action === 'accept' ? 'accept-counter' : 'decline-counter';
   const res = await fetch(gq(`/api/bets/${betId}/${endpoint}`), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pin })
+    headers: bettorHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({})
   });
   if (res.status === 401) {
     document.getElementById('betsError').textContent = 'Incorrect PIN.';
