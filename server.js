@@ -41,6 +41,11 @@ function defaultData() {
       adminPasscode: '',          // '' = no passcode set yet, /admin is open
       shadingDollarsPerPoint: 50, // $X of net imbalance per player = 1 point of exposure shading
       autoMoveCap: 5,             // max points the counter-offer algorithm will suggest in one shot
+      // When bettors may send a price proposal (RFQ) on a market:
+      //   'exhausted-only' (default) - only on a side with no liquidity left
+      //   'anytime'                  - on any open side
+      // Global default; each player can override via player.allowProposals.
+      allowProposals: 'exhausted-only',
       groupNames: { la: 'LA Bowlers', london: 'London Bowlers' }
     },
     groups: {
@@ -56,11 +61,13 @@ function normalizeGroup(g) {
   // migrate old format (array of name strings) to { name, pin } objects
   g.bettors = g.bettors.map(b => (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' });
   if (!Array.isArray(g.players)) g.players = [];
-  // Ensure every player has the mode and pings fields (migration for existing records)
+  // Migration for existing records. Existing players keep whatever mode they
+  // already had (don't flip live markets); only genuinely missing modes default.
+  // allowProposals: null means "use the global settings default".
   g.players = g.players.map(p => ({
     ...p,
     mode: p.mode || 'algo',
-    pings: Array.isArray(p.pings) ? p.pings : []
+    allowProposals: p.allowProposals === undefined ? null : p.allowProposals
   }));
   if (!Array.isArray(g.bets)) g.bets = [];
   return g;
@@ -184,9 +191,22 @@ function effective(player, settings) {
   };
 }
 
-function publicPlayer(p) {
+// Resolve whether/when bettors can send price proposals on a player's market.
+// Player override wins; otherwise the global setting. Falls back to the safe
+// default ('exhausted-only') for any unrecognised value.
+function effectiveAllowProposals(player, settings) {
+  const v = (player && player.allowProposals != null)
+    ? player.allowProposals
+    : (settings && settings.allowProposals);
+  return v === 'anytime' ? 'anytime' : 'exhausted-only';
+}
+
+function publicPlayer(p, settings) {
   // Shape sent to the bettor view - price + available size on each side only.
   const mode = p.mode || 'algo';
+  const bidExhausted = mode === 'finite' && p.bidSize <= 0;
+  const offerExhausted = mode === 'finite' && p.offerSize <= 0;
+  const allowProposals = effectiveAllowProposals(p, settings || {});
   return {
     id: p.id,
     name: p.name,
@@ -198,8 +218,12 @@ function publicPlayer(p) {
     finalScore: p.finalScore,
     mode,
     // In finite mode, tell the bettor view when a side has no more liquidity
-    bidExhausted: mode === 'finite' && p.bidSize <= 0,
-    offerExhausted: mode === 'finite' && p.offerSize <= 0
+    bidExhausted,
+    offerExhausted,
+    // Proposal (RFQ) availability, so the bettor view can offer "Propose a bet".
+    allowProposals,
+    canProposeUnder: p.status === 'open' && (allowProposals === 'anytime' || bidExhausted),
+    canProposeOver:  p.status === 'open' && (allowProposals === 'anytime' || offerExhausted)
   };
 }
 
@@ -523,12 +547,15 @@ app.get('/api/settings', async (req, res) => {
 
 app.put('/api/settings', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const { standardSize, moveIncrement, adminPasscode, shadingDollarsPerPoint, autoMoveCap, groupNames } = req.body;
+  const { standardSize, moveIncrement, adminPasscode, shadingDollarsPerPoint, autoMoveCap, allowProposals, groupNames } = req.body;
   if (standardSize != null) data.settings.standardSize = Number(standardSize);
   if (moveIncrement != null) data.settings.moveIncrement = Number(moveIncrement);
   if (adminPasscode !== undefined) data.settings.adminPasscode = String(adminPasscode || '');
   if (shadingDollarsPerPoint != null) data.settings.shadingDollarsPerPoint = Math.max(1, Number(shadingDollarsPerPoint));
   if (autoMoveCap != null) data.settings.autoMoveCap = Math.max(1, Number(autoMoveCap));
+  if (allowProposals != null) {
+    data.settings.allowProposals = allowProposals === 'anytime' ? 'anytime' : 'exhausted-only';
+  }
   if (groupNames) {
     if (groupNames.la) data.settings.groupNames.la = String(groupNames.la).trim();
     if (groupNames.london) data.settings.groupNames.london = String(groupNames.london).trim();
@@ -597,7 +624,7 @@ app.delete('/api/bettors/:name', requireAdmin, async (req, res) => {
 app.get('/api/players', async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
-  res.json(group.players.map(publicPlayer));
+  res.json(group.players.map(p => publicPlayer(p, data.settings)));
 });
 
 // Full detail (admin view)
@@ -607,8 +634,10 @@ app.get('/api/admin/players', requireAdmin, async (req, res) => {
   const enriched = group.players.map(p => {
     const bets = group.bets.filter(b => b.playerId === p.id);
     const pendingCount = bets.filter(b => b.status === 'pending').length;
-    const pingCount = (p.pings || []).filter(pg => pg.status === 'waiting').length;
-    return { ...p, betCount: bets.length, pendingCount, pingCount };
+    const proposalCount = bets.filter(b =>
+      b.kind === 'proposal' && (b.status === 'proposed' || b.status === 'proposal-countered')
+    ).length;
+    return { ...p, betCount: bets.length, pendingCount, proposalCount };
   });
   res.json(enriched);
 });
@@ -616,7 +645,7 @@ app.get('/api/admin/players', requireAdmin, async (req, res) => {
 app.post('/api/players', requireAdmin, async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
-  const { name, bid, offer, bidSize, offerSize, standardSize, moveIncrement, autoMoveEnabled } = req.body;
+  const { name, bid, offer, bidSize, offerSize, standardSize, moveIncrement, autoMoveEnabled, mode, allowProposals } = req.body;
   if (!name || bid == null || offer == null) {
     return res.status(400).json({ error: 'name, bid and offer are required' });
   }
@@ -631,8 +660,11 @@ app.post('/api/players', requireAdmin, async (req, res) => {
     standardSize: standardSize != null && standardSize !== '' ? Number(standardSize) : null,
     moveIncrement: moveIncrement != null && moveIncrement !== '' ? Number(moveIncrement) : null,
     autoMoveEnabled: autoMoveEnabled !== false,
-    mode: 'algo', // 'algo' | 'finite'
-    pings: [],    // interest pings for finite mode: [{id, bettorName, side, timestamp, status}]
+    // New players default to manual mode. Algo mode is on its way out; markets
+    // should feel like real liquidity that the market maker re-racks by hand.
+    mode: mode === 'algo' ? 'algo' : 'finite', // 'algo' | 'finite'
+    allowProposals: allowProposals === 'anytime' ? 'anytime'
+                  : allowProposals === 'exhausted-only' ? 'exhausted-only' : null, // null = use global
     status: 'open', // open | paused | voided | settled
     finalScore: null
   };
@@ -657,7 +689,7 @@ app.put('/api/players/:id', requireAdmin, async (req, res) => {
 
   const {
     name, bid, offer, bidSize, offerSize,
-    standardSize, moveIncrement, autoMoveEnabled, status, mode
+    standardSize, moveIncrement, autoMoveEnabled, status, mode, allowProposals
   } = req.body;
 
   if (name != null) player.name = String(name).trim();
@@ -666,22 +698,19 @@ app.put('/api/players/:id', requireAdmin, async (req, res) => {
   if (player.offer < player.bid) {
     return res.status(400).json({ error: 'offer must be >= bid' });
   }
-  // Mode toggle: 'algo' | 'finite'. Switching back to algo clears all pings.
+  // Mode toggle: 'algo' | 'finite'.
   if (mode === 'algo' || mode === 'finite') {
     player.mode = mode;
-    if (mode === 'algo') player.pings = [];
   }
-  if (!Array.isArray(player.pings)) player.pings = [];
-  if (bidSize != null) {
-    player.bidSize = Math.max(0, Number(bidSize));
-    // Re-racking bid side: expire any outstanding invitations so bettors must re-ping
-    player.pings = player.pings.filter(p => !(p.side === 'under' && p.status === 'invited'));
+  // Per-player proposal policy: 'anytime', 'exhausted-only', or null to fall
+  // back to the global setting.
+  if (allowProposals !== undefined) {
+    player.allowProposals = allowProposals === 'anytime' ? 'anytime'
+      : allowProposals === 'exhausted-only' ? 'exhausted-only'
+      : null;
   }
-  if (offerSize != null) {
-    player.offerSize = Math.max(0, Number(offerSize));
-    // Re-racking offer side: expire any outstanding invitations
-    player.pings = player.pings.filter(p => !(p.side === 'over' && p.status === 'invited'));
-  }
+  if (bidSize != null) player.bidSize = Math.max(0, Number(bidSize));
+  if (offerSize != null) player.offerSize = Math.max(0, Number(offerSize));
   if (standardSize !== undefined) player.standardSize = standardSize === '' || standardSize === null ? null : Number(standardSize);
   if (moveIncrement !== undefined) player.moveIncrement = moveIncrement === '' || moveIncrement === null ? null : Number(moveIncrement);
   if (autoMoveEnabled != null) player.autoMoveEnabled = !!autoMoveEnabled;
@@ -727,7 +756,9 @@ app.post('/api/players/:id/settle', requireAdmin, async (req, res) => {
   let declinedPending = 0;
   group.bets.forEach(b => {
     if (b.playerId !== player.id) return;
-    if (b.status === 'pending' || b.status === 'countered') {
+    // Auto-decline anything still awaiting a decision: oversized pending bets,
+    // countered bets, and open RFQ proposals (proposed / privately countered).
+    if (['pending', 'countered', 'proposed', 'proposal-countered'].includes(b.status)) {
       b.status = 'declined';
       b.payout = 0;
       declinedPending++;
@@ -780,7 +811,7 @@ app.post('/api/players/:id/void', requireAdmin, async (req, res) => {
     if (b.status === 'open') {
       b.status = 'voided';
       b.payout = b.stake; // full refund, no contest
-    } else if (b.status === 'pending') {
+    } else if (['pending', 'countered', 'proposed', 'proposal-countered'].includes(b.status)) {
       b.status = 'declined';
       b.payout = 0;
     }
@@ -822,8 +853,8 @@ app.get('/api/admin/summary', requireAdmin, async (req, res) => {
   const londonMarkets = data.groups.london.players.filter(p => p.status === 'open' || p.status === 'paused');
 
   res.json({
-    la:      { ...la,     markets: laMarkets.map(publicPlayer)     },
-    london:  { ...london, markets: londonMarkets.map(publicPlayer) },
+    la:      { ...la,     markets: laMarkets.map(p => publicPlayer(p, data.settings))     },
+    london:  { ...london, markets: londonMarkets.map(p => publicPlayer(p, data.settings)) },
     combined,
     groupNames: data.settings.groupNames
   });
@@ -928,12 +959,6 @@ app.post('/api/bets', async (req, res) => {
     bet.price = { bid: player.bid, offer: player.offer };
     bet.requestedPrice = null;
     fillBet(player, side, stakeNum, data.settings);
-    // Clear any outstanding ping for this bettor/player/side (invitation fulfilled)
-    if (Array.isArray(player.pings)) {
-      player.pings = player.pings.filter(pg =>
-        !(pg.bettorName.toLowerCase() === canonicalName.toLowerCase() && pg.side === side)
-      );
-    }
   } else {
     // Algo mode only: oversized bet goes pending for market maker review
     bet.status = 'pending';
@@ -1068,114 +1093,191 @@ app.post('/api/bets/:id/cancel', requireAdmin, async (req, res) => {
   res.json({ bet });
 });
 
-// ---------- finite mode pings ----------
+// ---------- proposals (RFQ) ----------
+//
+// Replaces the old "ping for interest" flow. A bettor names a level AND a size
+// on a market (typically a side with no liquidity left) and the market maker can
+// accept it, privately counter it, or decline it. One round only.
+//
+// Proposals live in group.bets so they show up in the bettor's own bet list and,
+// once accepted, in the exposure/settlement math automatically. Lifecycle:
+//   proposed            -> bettor's open RFQ, awaiting the market maker
+//   proposal-countered  -> market maker countered privately, awaiting the bettor
+//   open                -> agreed; a live bet at the agreed level (NO book size
+//                          consumed, NO auto-move) that settles like any other
+//   declined            -> ended with no trade
+//
+// A proposal carries a single side + level, so its price only fills the relevant
+// leg; gradeBet() reads price.bid for unders and price.offer for overs.
+function levelPrice(side, level) {
+  return side === 'under' ? { bid: level, offer: null } : { bid: null, offer: level };
+}
 
-// Bettor registers interest when a finite-mode side is exhausted.
-app.post('/api/players/:id/ping', async (req, res) => {
+// Bettor sends a price proposal on a market.
+app.post('/api/players/:id/propose', async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
   const player = group.players.find(p => p.id === req.params.id);
   if (!player) return res.status(404).json({ error: 'player not found' });
-  if ((player.mode || 'algo') !== 'finite') {
-    return res.status(400).json({ error: 'this market is not in manual mode' });
-  }
   if (player.status !== 'open') {
     return res.status(400).json({ error: 'market is not open' });
   }
-
-  const { side } = req.body;
-  if (!side) return res.status(400).json({ error: 'side is required' });
-  if (side !== 'over' && side !== 'under') return res.status(400).json({ error: "side must be 'over' or 'under'" });
 
   const auth = authenticateBettor(req, group);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
   const canonicalName = auth.bettor.name;
 
-  const remaining = side === 'under' ? player.bidSize : player.offerSize;
-  if (remaining > 0) {
-    return res.status(400).json({ error: 'liquidity is still available — place a bet instead' });
+  const { side } = req.body;
+  const level = Number(req.body.level);
+  const size = Number(req.body.size);
+  if (side !== 'over' && side !== 'under') return res.status(400).json({ error: "side must be 'over' or 'under'" });
+  if (!(level > 0)) return res.status(400).json({ error: 'level must be a positive number' });
+  if (!(size > 0)) return res.status(400).json({ error: 'size must be a positive number' });
+
+  // Gate on the market's proposal policy.
+  const policy = effectiveAllowProposals(player, data.settings);
+  if (policy === 'exhausted-only') {
+    const remaining = side === 'under' ? player.bidSize : player.offerSize;
+    if (remaining > 0) {
+      return res.status(400).json({ error: 'there is still liquidity on that side — place a bet instead' });
+    }
   }
 
-  // No duplicate pings per bettor/side
-  const existing = (player.pings || []).find(p =>
-    p.bettorName.toLowerCase() === canonicalName.toLowerCase() && p.side === side
-  );
-  if (existing) {
-    return res.status(400).json({ error: "you're already in the queue for that side" });
-  }
-
-  const ping = {
-    id: id('ping'),
+  const proposal = {
+    id: id('b'),
+    playerId: player.id,
     bettorName: canonicalName,
     side,
+    stake: size,
+    kind: 'proposal',
+    status: 'proposed',
+    proposedLevel: level,
+    price: null,
+    counterPrice: null,
+    requestedPrice: null,
     timestamp: new Date().toISOString(),
-    status: 'waiting'
+    payout: null
   };
-  if (!Array.isArray(player.pings)) player.pings = [];
-  player.pings.push(ping);
+  group.bets.push(proposal);
   await saveData(data);
-  res.status(201).json({ ok: true, message: "Interest recorded — we'll let you know when liquidity is back." });
+  res.status(201).json({ proposal });
 });
 
-// Bettor fetches their active invitations (finite mode, status='invited').
-app.get('/api/invitations', async (req, res) => {
+// Admin: list open proposals (awaiting the market maker or the bettor).
+app.get('/api/admin/proposals', requireAdmin, async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
+  const playerNames = Object.fromEntries(group.players.map(p => [p.id, p.name]));
+  const proposals = group.bets
+    .filter(b => b.kind === 'proposal' && (b.status === 'proposed' || b.status === 'proposal-countered'))
+    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+    .map(b => ({ ...b, playerName: playerNames[b.playerId] || '?' }));
+  res.json(proposals);
+});
+
+function findProposal(group, id) {
+  return group.bets.find(b => b.id === id && b.kind === 'proposal');
+}
+
+// Admin accepts a proposal at the level and size the bettor named. Agreed
+// proposals do NOT consume book size and do NOT trigger an auto-move — they are
+// a private trade layered on top of the public market.
+app.post('/api/proposals/:id/accept', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  const bet = findProposal(group, req.params.id);
+  if (!bet) return res.status(404).json({ error: 'proposal not found' });
+  if (bet.status !== 'proposed') return res.status(400).json({ error: 'proposal is not awaiting the market maker' });
+  const player = group.players.find(p => p.id === bet.playerId);
+  if (!player) return res.status(404).json({ error: 'player not found' });
+  if (player.status !== 'open') return res.status(400).json({ error: 'market is not open' });
+
+  bet.price = levelPrice(bet.side, bet.proposedLevel);
+  bet.status = 'open';
+  await saveData(data);
+  res.json({ bet });
+});
+
+// Admin counters a proposal PRIVATELY. Unlike /api/bets/:id/counter this does
+// NOT touch player.bid / player.offer, so the public board is unchanged. The
+// counter can adjust the level and, optionally, the size.
+app.post('/api/proposals/:id/counter', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  const bet = findProposal(group, req.params.id);
+  if (!bet) return res.status(404).json({ error: 'proposal not found' });
+  if (bet.status !== 'proposed') return res.status(400).json({ error: 'proposal is not awaiting the market maker' });
+
+  const level = Number(req.body.level);
+  if (!(level > 0)) return res.status(400).json({ error: 'counter level must be a positive number' });
+  let size = bet.stake;
+  if (req.body.size !== undefined && req.body.size !== null && req.body.size !== '') {
+    size = Number(req.body.size);
+    if (!(size > 0)) return res.status(400).json({ error: 'counter size must be a positive number' });
+  }
+
+  bet.counterPrice = { level, size };
+  bet.status = 'proposal-countered';
+  await saveData(data);
+  res.json({ bet });
+});
+
+// Admin declines a proposal (at either stage).
+app.post('/api/proposals/:id/decline', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  const bet = findProposal(group, req.params.id);
+  if (!bet) return res.status(404).json({ error: 'proposal not found' });
+  if (bet.status !== 'proposed' && bet.status !== 'proposal-countered') {
+    return res.status(400).json({ error: 'proposal is not open' });
+  }
+  bet.status = 'declined';
+  bet.payout = 0;
+  await saveData(data);
+  res.json({ bet });
+});
+
+// Bettor accepts the market maker's private counter. One round: this ends it.
+app.post('/api/proposals/:id/accept-counter', async (req, res) => {
+  const data = await loadData();
+  const group = getGroup(data, req.query.g);
+  const bet = findProposal(group, req.params.id);
+  if (!bet) return res.status(404).json({ error: 'proposal not found' });
+  if (bet.status !== 'proposal-countered') return res.status(400).json({ error: 'proposal is not countered' });
 
   const auth = authenticateBettor(req, group);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
-  const bettorName = auth.bettor.name;
+  if (auth.bettor.name.toLowerCase() !== bet.bettorName.toLowerCase()) {
+    return res.status(403).json({ error: 'not your proposal' });
+  }
+  const player = group.players.find(p => p.id === bet.playerId);
+  if (!player) return res.status(404).json({ error: 'player not found' });
+  if (player.status !== 'open') return res.status(400).json({ error: 'market is not open' });
 
-  const invitations = [];
-  group.players.forEach(p => {
-    if (!Array.isArray(p.pings)) return;
-    p.pings.forEach(pg => {
-      if (pg.bettorName.toLowerCase() === bettorName.toLowerCase() && pg.status === 'invited') {
-        invitations.push({
-          pingId: pg.id,
-          playerId: p.id,
-          playerName: p.name,
-          side: pg.side,
-          currentBid: p.bid,
-          currentOffer: p.offer,
-          bidSize: p.bidSize,
-          offerSize: p.offerSize,
-          timestamp: pg.timestamp
-        });
-      }
-    });
-  });
-  res.json(invitations);
+  bet.stake = bet.counterPrice.size;
+  bet.price = levelPrice(bet.side, bet.counterPrice.level);
+  bet.status = 'open';
+  await saveData(data);
+  res.json({ bet });
 });
 
-// Admin: promote a waiting ping to 'invited' — bettor gets a "you're up" notification.
-app.post('/api/admin/players/:id/pings/:pingId/invite', requireAdmin, async (req, res) => {
+// Bettor declines the market maker's counter.
+app.post('/api/proposals/:id/decline-counter', async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
-  const player = group.players.find(p => p.id === req.params.id);
-  if (!player) return res.status(404).json({ error: 'player not found' });
+  const bet = findProposal(group, req.params.id);
+  if (!bet) return res.status(404).json({ error: 'proposal not found' });
+  if (bet.status !== 'proposal-countered') return res.status(400).json({ error: 'proposal is not countered' });
 
-  const ping = (player.pings || []).find(p => p.id === req.params.pingId);
-  if (!ping) return res.status(404).json({ error: 'ping not found' });
-
-  ping.status = 'invited';
+  const auth = authenticateBettor(req, group);
+  if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+  if (auth.bettor.name.toLowerCase() !== bet.bettorName.toLowerCase()) {
+    return res.status(403).json({ error: 'not your proposal' });
+  }
+  bet.status = 'declined';
+  bet.payout = 0;
   await saveData(data);
-  res.json({ ping, player: { id: player.id, name: player.name } });
-});
-
-// Admin: remove a ping from the queue entirely.
-app.delete('/api/admin/players/:id/pings/:pingId', requireAdmin, async (req, res) => {
-  const data = await loadData();
-  const group = getGroup(data, req.query.g);
-  const player = group.players.find(p => p.id === req.params.id);
-  if (!player) return res.status(404).json({ error: 'player not found' });
-
-  const before = (player.pings || []).length;
-  player.pings = (player.pings || []).filter(p => p.id !== req.params.pingId);
-  if (player.pings.length === before) return res.status(404).json({ error: 'ping not found' });
-
-  await saveData(data);
-  res.json({ ok: true });
+  res.json({ bet });
 });
 
 // ---------- pages ----------
@@ -1278,4 +1380,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, gradeBet, exposureRows, bettorExposureRows, normalize, defaultData };
+module.exports = {
+  app, gradeBet, exposureRows, bettorExposureRows,
+  levelPrice, effectiveAllowProposals, normalize, defaultData
+};

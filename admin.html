@@ -104,6 +104,22 @@
     </div>
     <div class="form-row" style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
       <div>
+        <div style="font-size:12px; color:var(--grey); margin-bottom:4px; font-weight:600;">PROPOSALS (RFQ)</div>
+        <div class="small" style="margin-bottom:8px;">
+          When bettors may propose a price &amp; size. Each market can override this in Market Runs.
+        </div>
+      </div>
+      <div>
+        <label>Default policy</label>
+        <select id="allowProposals" style="width:180px;">
+          <option value="exhausted-only">Exhausted side only</option>
+          <option value="anytime">Anytime</option>
+        </select>
+      </div>
+      <button class="btn secondary" onclick="saveProposalSettings()">Save proposal policy</button>
+    </div>
+    <div class="form-row" style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
+      <div>
         <div style="font-size:12px; color:var(--grey); margin-bottom:4px; font-weight:600;">GROUP NAMES</div>
       </div>
       <div>
@@ -160,14 +176,14 @@
       </table>
       <div id="noPending" class="small">No pending requests.</div>
       <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
-        <div style="font-size:11px; color:var(--grey); font-weight:700; letter-spacing:0.06em; margin-bottom:8px;">INTEREST QUEUE <span class="small" style="font-weight:400; letter-spacing:0;">(manual-mode bettors waiting for liquidity)</span></div>
-        <table id="pingQueueTable" class="hidden">
+        <div style="font-size:11px; color:var(--grey); font-weight:700; letter-spacing:0.06em; margin-bottom:8px;">PROPOSALS <span class="small" style="font-weight:400; letter-spacing:0;">(bettor-named level &amp; size &mdash; accept, counter, or decline)</span></div>
+        <table id="proposalsTable" class="hidden">
           <thead>
-            <tr><th>Player</th><th>Bettor</th><th>Side</th><th>Registered</th><th>Status</th><th>Actions</th></tr>
+            <tr><th>Player</th><th>Bettor</th><th>Side</th><th>Level</th><th>Size</th><th>When</th><th>Actions</th></tr>
           </thead>
-          <tbody id="pingQueueBody"></tbody>
+          <tbody id="proposalsBody"></tbody>
         </table>
-        <div id="noPings" class="small">No interest registered.</div>
+        <div id="noProposals" class="small">No proposals.</div>
       </div>
     </div>
 
@@ -450,6 +466,7 @@ async function loadSettings() {
   document.getElementById('moveIncrement').value = s.moveIncrement;
   document.getElementById('shadingDollarsPerPoint').value = s.shadingDollarsPerPoint ?? 50;
   document.getElementById('autoMoveCap').value = s.autoMoveCap ?? 5;
+  document.getElementById('allowProposals').value = s.allowProposals === 'anytime' ? 'anytime' : 'exhausted-only';
   document.getElementById('passcodeStatus').textContent = s.passcodeSet ? '(currently set)' : '(not set)';
   document.getElementById('noPasscodeBanner').classList.toggle('hidden', !!s.passcodeSet);
   if (s.groupNames) {
@@ -483,6 +500,17 @@ async function saveAlgoSettings() {
   });
   showToast('Algo settings saved.');
   await loadSettings();
+}
+
+async function saveProposalSettings() {
+  const allowProposals = document.getElementById('allowProposals').value;
+  await adminFetch('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allowProposals })
+  });
+  showToast('Proposal policy saved.');
+  await loadAll();
 }
 
 async function saveGroupNames() {
@@ -672,7 +700,7 @@ async function loadPlayers() {
   renderPlayers();
   renderMarketRuns();
   renderMarketModeControls();
-  renderPingQueue();
+  loadProposals();
 }
 
 function renderPlayers() {
@@ -1237,15 +1265,29 @@ function renderMarketModeControls() {
               </div>
             </div>
           ` : ''}
-        </div>
-        ${isManual ? `
-          <div class="small" style="margin-top:5px; color:#9ca3af;">
-            Re-racking (updating caps) clears any outstanding invitations — bettors must re-ping.
+          <div>
+            <div style="font-size:10px; color:var(--grey); font-weight:700; margin-bottom:2px;">PROPOSALS</div>
+            <select style="font-size:12px;" onchange="setPlayerProposals('${p.id}', this.value)">
+              <option value="" ${p.allowProposals == null ? 'selected' : ''}>Default (global)</option>
+              <option value="exhausted-only" ${p.allowProposals === 'exhausted-only' ? 'selected' : ''}>Exhausted only</option>
+              <option value="anytime" ${p.allowProposals === 'anytime' ? 'selected' : ''}>Anytime</option>
+            </select>
           </div>
-        ` : ''}
+        </div>
       </div>
     `;
   }).join('');
+}
+
+async function setPlayerProposals(playerId, value) {
+  const res = await adminFetch(gg(`/api/players/${playerId}`), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allowProposals: value === '' ? null : value })
+  });
+  if (!res.ok) { showToast('Could not update proposal policy.'); return; }
+  showToast('Proposal policy updated.');
+  await loadAll();
 }
 
 async function setPlayerMode(playerId, mode) {
@@ -1271,76 +1313,139 @@ async function saveFiniteCapacity(playerId) {
     body: JSON.stringify(body)
   });
   if (res.ok) {
-    showToast('Caps saved. Invited pings for updated sides cleared.');
+    showToast('Caps saved.');
     await loadAll();
   } else {
     showToast('Save failed.');
   }
 }
 
-// ---------- interest queue (ping management) ----------
+// ---------- proposals (RFQ) ----------
 
-function renderPingQueue() {
-  const body = document.getElementById('pingQueueBody');
-  const tableEl = document.getElementById('pingQueueTable');
-  const noPings = document.getElementById('noPings');
+let openProposals = [];
+let openProposalCounterId = null;
+
+async function loadProposals() {
+  const body = document.getElementById('proposalsBody');
+  const tableEl = document.getElementById('proposalsTable');
+  const none = document.getElementById('noProposals');
   if (!body) return;
+  const res = await adminFetch(gg('/api/admin/proposals'));
+  openProposals = await res.json();
   body.innerHTML = '';
 
-  // Collect all pings from all players, enriched with player info
-  const allPings = [];
-  players.forEach(p => {
-    if (Array.isArray(p.pings)) {
-      p.pings.forEach(pg => {
-        allPings.push({ ...pg, playerName: p.name, playerId: p.id });
-      });
-    }
-  });
-  // Oldest first = head of the queue
-  allPings.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-  if (allPings.length === 0) {
+  if (!openProposals.length) {
     tableEl.classList.add('hidden');
-    noPings.classList.remove('hidden');
+    none.classList.remove('hidden');
     return;
   }
   tableEl.classList.remove('hidden');
-  noPings.classList.add('hidden');
+  none.classList.add('hidden');
 
-  allPings.forEach(pg => {
-    const tr = document.createElement('tr');
-    const isInvited = pg.status === 'invited';
-    const sideHtml = pg.side === 'under'
+  openProposals.forEach(pr => {
+    const sideHtml = pr.side === 'under'
       ? '<span style="color:var(--red); font-weight:700;">⬇ Under</span>'
       : '<span style="color:var(--green); font-weight:700;">⬆ Over</span>';
+    const countered = pr.status === 'proposal-countered';
+    const level = countered ? pr.counterPrice.level : pr.proposedLevel;
+    const size = countered ? pr.counterPrice.size : pr.stake;
+    const levelCell = countered
+      ? `<div style="font-size:11px;color:#9ca3af;">Bettor: ${pr.proposedLevel}</div><div style="font-weight:700;color:#92400e;">↳ You: ${pr.counterPrice.level}</div>`
+      : `${level}`;
+    const sizeCell = countered
+      ? `<div style="font-size:11px;color:#9ca3af;">$${pr.stake}</div><div style="font-weight:700;color:#92400e;">$${pr.counterPrice.size}</div>`
+      : `$${size}`;
+
+    const actions = countered
+      ? `<span class="badge pending">awaiting bettor</span>
+         <button class="btn danger" style="padding:2px 10px;font-size:12px;margin-left:6px;" onclick="declineProposal('${pr.id}')">Withdraw</button>`
+      : `<div style="display:flex; gap:4px; flex-wrap:wrap;">
+           <button class="btn" style="padding:2px 10px;font-size:12px;" onclick="acceptProposal('${pr.id}')">Accept</button>
+           <button class="btn secondary" style="padding:2px 10px;font-size:12px;background:#fef3c7;color:#92400e;border-color:#f59e0b;" onclick="showProposalCounter('${pr.id}')">Counter</button>
+           <button class="btn danger" style="padding:2px 10px;font-size:12px;" onclick="declineProposal('${pr.id}')">Decline</button>
+         </div>`;
+
+    const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${escapeHtml(pg.playerName)}</td>
-      <td>${escapeHtml(pg.bettorName)}</td>
+      <td>${escapeHtml(pr.playerName)}</td>
+      <td>${escapeHtml(pr.bettorName)}</td>
       <td>${sideHtml}</td>
-      <td style="font-size:11px;">${new Date(pg.timestamp).toLocaleString()}</td>
-      <td><span class="badge ${isInvited ? 'open' : 'pending'}">${isInvited ? 'invited' : 'waiting'}</span></td>
-      <td>
-        <div style="display:flex; gap:4px; flex-wrap:wrap;">
-          ${!isInvited ? `<button class="btn secondary" style="padding:2px 10px; font-size:12px;" onclick="invitePing('${pg.playerId}', '${pg.id}')">Invite</button>` : ''}
-          <button class="btn danger" style="padding:2px 10px; font-size:12px;" onclick="removePing('${pg.playerId}', '${pg.id}')">Remove</button>
+      <td>${levelCell}</td>
+      <td>${sizeCell}</td>
+      <td style="font-size:11px;">${new Date(pr.timestamp).toLocaleString()}</td>
+      <td>${actions}</td>
+    `;
+    body.appendChild(tr);
+
+    // Inline counter form row (hidden until "Counter" is clicked).
+    const cf = document.createElement('tr');
+    cf.id = `proposal-counter-${pr.id}`;
+    cf.className = 'hidden';
+    cf.innerHTML = `
+      <td colspan="7" style="background:#fffbeb;">
+        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+          <div>
+            <div style="font-size:11px; color:#92400e; font-weight:700;">Counter level</div>
+            <input id="proposal-counter-level-${pr.id}" type="number" step="0.5" value="${pr.proposedLevel}" style="width:90px;" />
+          </div>
+          <div>
+            <div style="font-size:11px; color:#92400e; font-weight:700;">Counter size ($)</div>
+            <input id="proposal-counter-size-${pr.id}" type="number" min="1" step="1" value="${pr.stake}" style="width:90px;" />
+          </div>
+          <button class="btn" style="background:#92400e;" onclick="sendProposalCounter('${pr.id}')">Send counter</button>
+          <button class="btn secondary" onclick="hideProposalCounter('${pr.id}')">Cancel</button>
         </div>
       </td>
     `;
-    body.appendChild(tr);
+    body.appendChild(cf);
   });
+
+  if (openProposalCounterId && openProposals.find(p => p.id === openProposalCounterId && p.status === 'proposed')) {
+    showProposalCounter(openProposalCounterId);
+  }
 }
 
-async function invitePing(playerId, pingId) {
-  const res = await adminFetch(gg(`/api/admin/players/${playerId}/pings/${pingId}/invite`), { method: 'POST' });
-  if (!res.ok) { showToast('Could not invite.'); return; }
-  showToast('Bettor invited — they will see it under My Bets.');
+function showProposalCounter(id) {
+  openProposalCounterId = id;
+  const el = document.getElementById(`proposal-counter-${id}`);
+  if (el) el.classList.remove('hidden');
+}
+function hideProposalCounter(id) {
+  openProposalCounterId = null;
+  const el = document.getElementById(`proposal-counter-${id}`);
+  if (el) el.classList.add('hidden');
+}
+
+async function acceptProposal(id) {
+  const res = await adminFetch(gg(`/api/proposals/${id}/accept`), { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) { showToast(data.error || 'Accept failed.'); return; }
+  showToast('Proposal accepted — trade is on.');
   await loadAll();
 }
 
-async function removePing(playerId, pingId) {
-  const res = await adminFetch(gg(`/api/admin/players/${playerId}/pings/${pingId}`), { method: 'DELETE' });
-  if (!res.ok) { showToast('Remove failed.'); return; }
-  showToast('Removed from queue.');
+async function sendProposalCounter(id) {
+  const level = Number(document.getElementById(`proposal-counter-level-${id}`).value);
+  const size = Number(document.getElementById(`proposal-counter-size-${id}`).value);
+  if (!(level > 0)) { showToast('Enter a counter level.'); return; }
+  if (!(size > 0)) { showToast('Enter a counter size.'); return; }
+  const res = await adminFetch(gg(`/api/proposals/${id}/counter`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ level, size })
+  });
+  const data = await res.json();
+  if (!res.ok) { showToast(data.error || 'Counter failed.'); return; }
+  openProposalCounterId = null;
+  showToast('Counter sent privately — bettor will accept or decline.');
+  await loadAll();
+}
+
+async function declineProposal(id) {
+  const res = await adminFetch(gg(`/api/proposals/${id}/decline`), { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) { showToast(data.error || 'Decline failed.'); return; }
+  showToast('Proposal declined.');
   await loadAll();
 }
 

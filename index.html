@@ -55,11 +55,6 @@
       </div>
       <button class="btn secondary" onclick="loadMyBets()">Show my bets</button>
     </div>
-    <!-- Invitations: shown when market maker has invited this bettor to bet -->
-    <div id="invitationsSection" class="hidden" style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
-      <div style="font-size:12px; font-weight:700; color:#7c3aed; margin-bottom:8px; letter-spacing:0.02em;">✅ YOU'RE UP</div>
-      <div id="invitationsList"></div>
-    </div>
     <table id="betsTable">
       <thead>
         <tr><th>Player</th><th>Side</th><th>Line</th><th>Stake</th><th>Status</th><th>Payout</th><th>When</th><th></th></tr>
@@ -92,6 +87,36 @@
       <button class="btn" onclick="submitBet()">Confirm Bet</button>
     </div>
     <div id="modalError" class="small" style="color:var(--red);"></div>
+  </div>
+</div>
+
+<div id="proposalBackdrop" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3 id="proposalTitle">Propose a bet</h3>
+    <div class="small" style="margin-bottom:10px;">
+      Name the level and size you want. It goes to the market maker, who can accept, counter, or decline.
+    </div>
+    <div class="form-row">
+      <div style="flex:1;">
+        <label>Your name</label>
+        <select id="proposalName"><option value="">Select your name</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div style="flex:1;">
+        <label id="proposalLevelLabel">Level</label>
+        <input id="proposalLevel" type="number" step="0.5" placeholder="e.g. 78" />
+      </div>
+      <div style="flex:1;">
+        <label>Size ($)</label>
+        <input id="proposalSize" type="number" min="1" step="1" placeholder="e.g. 25" />
+      </div>
+    </div>
+    <div class="form-row" style="justify-content:flex-end;">
+      <button class="btn secondary" onclick="closeProposalModal()">Cancel</button>
+      <button class="btn" onclick="submitProposal()">Send proposal</button>
+    </div>
+    <div id="proposalError" class="small" style="color:var(--red);"></div>
   </div>
 </div>
 
@@ -148,14 +173,22 @@ function priceSideHtml(p, side) {
   const isOpen = p.status === 'open';
   const isExhausted = isUnder ? p.bidExhausted : p.offerExhausted;
 
+  const canPropose = isUnder ? p.canProposeUnder : p.canProposeOver;
+
   if (!isOpen) {
     return `<span class="price ${side} disabled">${level}</span>`;
   }
   if (isExhausted) {
-    // Side has no liquidity in finite/manual mode — show greyed price + interest button
-    return `<span class="price ${side} disabled" style="opacity:0.35;">${level}</span><button class="btn-interest" onclick="registerInterest('${p.id}', '${side}')">Register interest</button>`;
+    // Side has no liquidity — show greyed price and (if allowed) a Propose button.
+    const proposeBtn = canPropose
+      ? `<button class="btn-interest" onclick="openProposalModal('${p.id}', '${side}')">Propose a bet</button>`
+      : '';
+    return `<span class="price ${side} disabled" style="opacity:0.35;">${level}</span>${proposeBtn}`;
   }
-  return `<span class="price ${side}" onclick='openModal(${JSON.stringify(p.id)}, "${side}")'>${level}</span>`;
+  const proposeBtn = canPropose
+    ? `<button class="btn-interest" onclick="openProposalModal('${p.id}', '${side}')">Propose</button>`
+    : '';
+  return `<span class="price ${side}" onclick='openModal(${JSON.stringify(p.id)}, "${side}")'>${level}</span>${proposeBtn}`;
 }
 
 function render() {
@@ -289,25 +322,9 @@ async function loadMyBets(opts = {}) {
   body.innerHTML = '';
   noBets.classList.add('hidden');
   errEl.classList.add('hidden');
-  if (!name) {
-    renderInvitations([]);
-    return;
-  }
+  if (!name) return;
 
-  // Fetch invitations (finite mode "you're up" notices) in parallel with bets
-  const headers = bettorHeaders();
-  const [invRes, betsRes] = await Promise.all([
-    fetch(gq('/api/invitations'), { headers }).catch(() => null),
-    fetch(gq('/api/bets'), { headers })
-  ]);
-
-  // Render invitations
-  if (invRes && invRes.ok) {
-    renderInvitations(await invRes.json());
-  } else {
-    renderInvitations([]);
-  }
-
+  const betsRes = await fetch(gq('/api/bets'), { headers: bettorHeaders() });
   if (betsRes.status === 401) {
     if (!opts.silent) errEl.classList.remove('hidden');
     return;
@@ -321,33 +338,48 @@ async function loadMyBets(opts = {}) {
   }
   bets.forEach(b => {
     const tr = document.createElement('tr');
+    const isProposal = b.kind === 'proposal';
     let line = '—';
-    if (b.status === 'countered' && b.counterPrice) {
-      // Show original request and counter clearly so the delta is visible
+    let actionCell = '';
+
+    if (isProposal) {
+      if (b.status === 'proposal-countered' && b.counterPrice) {
+        line = `<div style="font-size:11px; color:#9ca3af; line-height:1.5;">You: ${b.proposedLevel} ($${b.stake})</div><div style="font-size:13px; font-weight:700; color:#92400e; line-height:1.5;">↳ MM: ${b.counterPrice.level} ($${b.counterPrice.size})</div>`;
+        actionCell = `
+          <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="answerProposalCounter('${b.id}', 'accept')">Accept</button>
+          <button class="btn danger" style="padding:3px 10px;font-size:12px;margin-left:4px;" onclick="answerProposalCounter('${b.id}', 'decline')">Decline</button>
+        `;
+      } else if (b.status === 'open' && b.price) {
+        line = b.side === 'under' ? b.price.bid : b.price.offer;
+      } else {
+        line = `${b.proposedLevel} <em style="font-size:11px;">proposed</em>`;
+      }
+    } else if (b.status === 'countered' && b.counterPrice) {
       const reqLevel = b.requestedPrice
         ? (b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer)
         : '?';
       const ctrLevel = b.side === 'under' ? b.counterPrice.bid : b.counterPrice.offer;
       line = `<div style="font-size:11px; color:#9ca3af; line-height:1.5;">Req: ${reqLevel}</div><div style="font-size:13px; font-weight:700; color:#92400e; line-height:1.5;">↳ Counter: ${ctrLevel}</div>`;
+      actionCell = `
+        <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="answerCounter('${b.id}', 'accept')">Accept</button>
+        <button class="btn danger" style="padding:3px 10px;font-size:12px;margin-left:4px;" onclick="answerCounter('${b.id}', 'decline')">Decline</button>
+      `;
     } else if (b.price) {
       line = b.side === 'under' ? b.price.bid : b.price.offer;
     } else if (b.requestedPrice) {
       line = `~${b.side === 'under' ? b.requestedPrice.bid : b.requestedPrice.offer} <em style="font-size:11px;">req.</em>`;
     }
+
     const payout = b.payout == null ? '—' : ('$' + b.payout);
-    let actionCell = '';
-    if (b.status === 'countered') {
-      actionCell = `
-        <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="answerCounter('${b.id}', 'accept')">Accept</button>
-        <button class="btn danger" style="padding:3px 10px;font-size:12px;margin-left:4px;" onclick="answerCounter('${b.id}', 'decline')">Decline</button>
-      `;
-    }
+    const statusLabel = b.status === 'proposal-countered' ? 'countered'
+      : b.status === 'proposed' ? 'proposed'
+      : b.status;
     tr.innerHTML = `
       <td>${escapeHtml(b.playerName)}</td>
       <td>${b.side === 'under' ? 'Under' : 'Over'}</td>
       <td>${line}</td>
       <td>$${b.stake}</td>
-      <td><span class="badge ${b.status}">${b.status}</span></td>
+      <td><span class="badge ${b.status}">${statusLabel}</span></td>
       <td>${payout}</td>
       <td style="font-size:11px;">${new Date(b.timestamp).toLocaleString()}</td>
       <td>${actionCell}</td>
@@ -356,61 +388,79 @@ async function loadMyBets(opts = {}) {
   });
 }
 
-function renderInvitations(invitations) {
-  const section = document.getElementById('invitationsSection');
-  const list = document.getElementById('invitationsList');
-  if (!section || !list) return;
-  if (!invitations || invitations.length === 0) {
-    section.classList.add('hidden');
-    return;
-  }
-  section.classList.remove('hidden');
-  list.innerHTML = invitations.map(inv => {
-    const level = inv.side === 'under' ? inv.currentBid : inv.currentOffer;
-    const remaining = inv.side === 'under' ? inv.bidSize : inv.offerSize;
-    const sideHtml = inv.side === 'under'
-      ? `<span style="color:var(--red); font-weight:700;">⬇ Under @ ${level}</span>`
-      : `<span style="color:var(--green); font-weight:700;">⬆ Over @ ${level}</span>`;
-    return `
-      <div style="display:flex; align-items:center; gap:12px; padding:10px 12px; background:#f5f3ff; border:1px solid #ede9fe; border-radius:8px; margin-bottom:6px; flex-wrap:wrap;">
-        <div style="flex:1; min-width:160px;">
-          <div style="font-size:13px; font-weight:600;">${escapeHtml(inv.playerName)}: ${sideHtml}</div>
-          <div style="font-size:11px; color:#9ca3af; margin-top:2px;">$${remaining} available now</div>
-        </div>
-        <button class="btn" style="padding:4px 16px; font-size:13px;" onclick="betFromInvitation('${inv.playerId}', '${inv.side}')">Bet now →</button>
-      </div>
-    `;
-  }).join('');
-}
+// ---------- proposals (RFQ) ----------
 
-function betFromInvitation(playerId, side) {
+let pendingProposal = null; // { playerId, side, player }
+
+function openProposalModal(playerId, side) {
   const player = players.find(p => p.id === playerId);
   if (!player || player.status !== 'open') {
     showToast('Market is not currently open — refresh the page.');
     return;
   }
-  openModal(playerId, side);
+  pendingProposal = { playerId, side, player };
+  const verb = side === 'under' ? 'Propose an Under' : 'Propose an Over';
+  document.getElementById('proposalTitle').textContent = `${verb} on ${player.name}`;
+  document.getElementById('proposalLevelLabel').textContent =
+    side === 'under' ? 'Your level (bid)' : 'Your level (offer)';
+  document.getElementById('proposalError').textContent = '';
+  document.getElementById('proposalName').value = localStorage.getItem('bettorName') || '';
+  document.getElementById('proposalLevel').value = '';
+  document.getElementById('proposalSize').value = '';
+  document.getElementById('proposalBackdrop').classList.remove('hidden');
 }
 
-async function registerInterest(playerId, side) {
-  // Use the name already selected in the My Bets dropdown, or fall back to localStorage
-  const myNameEl = document.getElementById('myName');
-  const name = (myNameEl && myNameEl.value.trim()) || localStorage.getItem('bettorName') || '';
-  if (!name) {
-    showToast('Select your name in "My Bets" first.');
-    return;
-  }
-  const res = await fetch(gq(`/api/players/${playerId}/ping`), {
+function closeProposalModal() {
+  document.getElementById('proposalBackdrop').classList.add('hidden');
+  pendingProposal = null;
+}
+
+async function submitProposal() {
+  const name = document.getElementById('proposalName').value.trim();
+  const level = Number(document.getElementById('proposalLevel').value);
+  const size = Number(document.getElementById('proposalSize').value);
+  const errEl = document.getElementById('proposalError');
+  if (!name) { errEl.textContent = 'Enter your name.'; return; }
+  if (!(level > 0)) { errEl.textContent = 'Enter a level.'; return; }
+  if (!(size > 0)) { errEl.textContent = 'Enter a size greater than 0.'; return; }
+
+  const storedPin = (document.getElementById('myPin').value.trim()) || localStorage.getItem('bettorPin') || '';
+  if (!storedPin) { errEl.textContent = 'Enter your PIN in "My Bets" below first.'; return; }
+
+  const res = await fetch(gq(`/api/players/${pendingProposal.playerId}/propose`), {
     method: 'POST',
-    headers: bettorHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ side })
+    headers: { 'Content-Type': 'application/json', 'X-Bettor-Name': name, 'X-Bettor-Pin': storedPin },
+    body: JSON.stringify({ side: pendingProposal.side, level, size })
   });
   const data = await res.json();
-  if (res.ok) {
-    showToast("Noted — we'll let you know when liquidity is back.");
-  } else {
-    showToast(data.error || 'Could not register interest.');
+  if (!res.ok) { errEl.textContent = data.error || 'Could not send proposal.'; return; }
+  localStorage.setItem('bettorName', name);
+  localStorage.setItem('bettorPin', storedPin);
+  const side = pendingProposal.side;
+  const playerName = pendingProposal.player.name;
+  closeProposalModal();
+  showToast(`Proposal sent: ${playerName} ${side} ${level} for $${size} — waiting on market maker`);
+  document.getElementById('myName').value = name;
+  await loadMyBets({ silent: true });
+}
+
+async function answerProposalCounter(proposalId, action) {
+  const endpoint = action === 'accept' ? 'accept-counter' : 'decline-counter';
+  const res = await fetch(gq(`/api/proposals/${proposalId}/${endpoint}`), {
+    method: 'POST',
+    headers: bettorHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({})
+  });
+  if (res.status === 401) {
+    document.getElementById('betsError').textContent = 'Incorrect PIN.';
+    document.getElementById('betsError').classList.remove('hidden');
+    return;
   }
+  const data = await res.json();
+  if (!res.ok) { showToast(data.error || 'Something went wrong.'); return; }
+  showToast(action === 'accept' ? 'Counter accepted — trade is on!' : 'Counter declined.');
+  await loadMyBets();
+  await loadPlayers();
 }
 
 async function answerCounter(betId, action) {
@@ -435,7 +485,7 @@ async function answerCounter(betId, action) {
 (async () => {
   await loadBettors();
   await loadPlayers();
-  // Poll players every 5s; also silently refresh My Bets (which loads invitations) if a name is selected
+  // Poll players every 5s; also silently refresh My Bets if a name is selected
   setInterval(() => {
     loadPlayers();
     if (document.getElementById('myName') && document.getElementById('myName').value) {
