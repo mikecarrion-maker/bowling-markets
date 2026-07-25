@@ -7,10 +7,17 @@ with depth-based liquidity, auto-moving lines, an approval queue for big bets, a
 
 - Each player has a market: a **bid** (e.g. 75) and an **offer** (e.g. 85), each with a **size**
   (how much can be bet at that price right now — e.g. "$10 x $10").
-- **Hit the bid** ("under") = betting the player scores **below** the bid.
-- **Lift the offer** ("over") = betting the player scores **above** the offer.
-- Score lands **between** bid and offer → **push**, stake returned, no win/loss.
+- **Hit the bid** ("under") = betting the player scores **below** the bid you hit.
+- **Lift the offer** ("over") = betting the player scores **above** the offer you lifted.
+- Each bet is graded against **its own execution level**, not the spread at settle time:
+  an "under" wins if the final score is below the bid it hit, an "over" wins if the final
+  score is above the offer it lifted.
+- A final score landing **exactly on** your level is a **push** (stake returned).
 - A win pays even money (stake back, plus an equal amount).
+
+> Note: grading is per-bet against the level you traded at — not "anywhere inside the current
+> bid/offer is a push". If you hit a bid of 85 and the bowler shoots 87, that's a loss (you bet
+> under 85 and they beat it), even if 87 sits inside the market's spread at settle time.
 
 ## Liquidity, auto-move & reset
 
@@ -50,8 +57,10 @@ From the dashboard you can, per player:
 - **Void** an entire market — refunds *all* open bets on that player as "no contest" and
   declines any pending requests. Use this if a player withdraws, etc.
 - **Settle** — enter the final score to grade every open bet (won/lost/push) and compute
-  payouts. Any pending requests are automatically declined. **Reopen** undoes a settlement or
-  void if you made a mistake.
+  payouts. Each bet is graded against the level it executed at (see "How the markets work").
+  Any pending requests are automatically declined. **Reopen** undoes a settlement or
+  void if you made a mistake. Settling only grades bets that are still open, so it's
+  fix-forward — re-settling won't retroactively change bets already graded.
 - **Delete** a player entirely (only available once settled or voided) — removes the player and
   all associated bets.
 

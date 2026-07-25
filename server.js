@@ -245,6 +245,42 @@ function fillBet(player, side, stake, settings) {
   }
 }
 
+// Grade a single filled ("open") bet against its OWN execution level once the
+// final score is known.
+//
+// This is deliberately NOT graded against the bid/offer spread at settle time.
+// The spread is only the market maker's quote at a moment; each bet resolves
+// against the exact level it was actually executed at:
+//   under = hit the bid      -> wins if the final score comes in BELOW that bid
+//   over  = lifted the offer  -> wins if the final score comes in ABOVE that offer
+//   score exactly on the level -> push (stake returned)
+//
+// Example (the bug this fixes): on an 85/95 market a bettor hits the bid at 85.
+// The bowler shoots 87. They bet under 85 and the score beat it, so they LOSE.
+// The old code graded 87 as "inside the spread" and returned a push.
+function gradeBet(score, bet) {
+  const price = bet.price || {};
+  const level = bet.side === 'under' ? price.bid : price.offer;
+  const s = Number(score);
+  let outcome; // 'won' | 'lost' | 'push'
+  if (level == null || isNaN(Number(level))) {
+    // An open bet should always carry an execution price; if one is somehow
+    // missing, push rather than silently grading it as a win or a loss.
+    outcome = 'push';
+  } else if (s === Number(level)) {
+    outcome = 'push';
+  } else if (bet.side === 'under') {
+    outcome = s < Number(level) ? 'won' : 'lost';
+  } else {
+    outcome = s > Number(level) ? 'won' : 'lost';
+  }
+  let payout;
+  if (outcome === 'won') payout = round2(bet.stake * 2); // stake back + even-money win
+  else if (outcome === 'push') payout = round2(bet.stake); // stake returned
+  else payout = 0;
+  return { outcome, payout };
+}
+
 // ---------- auth ----------
 
 // Constant-time string compare. Avoids leaking how much of a secret matched
@@ -652,18 +688,12 @@ app.post('/api/players/:id/settle', requireAdmin, async (req, res) => {
       return;
     }
     if (b.status !== 'open') return;
-    let outcome; // 'won' | 'lost' | 'push'
-    if (score < b.price.bid) {
-      outcome = b.side === 'under' ? 'won' : 'lost';
-    } else if (score > b.price.offer) {
-      outcome = b.side === 'over' ? 'won' : 'lost';
-    } else {
-      outcome = 'push';
-    }
+    // Fix-forward only: bets already graded on a previous settle (won/lost/push/
+    // voided) are left untouched — we only grade bets still 'open' right now, and
+    // each one against its own execution level via gradeBet().
+    const { outcome, payout } = gradeBet(score, b);
     b.status = outcome;
-    if (outcome === 'won') b.payout = b.stake * 2; // stake returned + even-money win
-    else if (outcome === 'push') b.payout = b.stake; // stake returned
-    else b.payout = 0;
+    b.payout = payout;
   });
 
   await saveData(data);
@@ -1185,7 +1215,14 @@ document.getElementById('f').addEventListener('submit', async function (ev) {
 </body></html>`;
 }
 
-app.listen(PORT, () => {
-  console.log(`Bowling markets app running at http://localhost:${PORT}`);
-  console.log(`Admin dashboard:        http://localhost:${PORT}/admin`);
-});
+// Only start the HTTP server when run directly (node server.js). When this file
+// is require()'d by a test, we export the app and helpers instead of listening,
+// so tests can exercise the pure logic without opening a port or a DB.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Bowling markets app running at http://localhost:${PORT}`);
+    console.log(`Admin dashboard:        http://localhost:${PORT}/admin`);
+  });
+}
+
+module.exports = { app, gradeBet, exposureRows, normalize, defaultData };
