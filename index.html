@@ -123,13 +123,19 @@
 <div id="toast" class="toast hidden"></div>
 
 <script>
-// Read group from URL param; default to 'la' for backward compat with existing bettor links
-const groupId = new URLSearchParams(location.search).get('g') || 'la';
+// Both groups are shown stacked on one page. Bettors are global now, so a
+// single name + PIN works across both.
+const GROUPS = ['la', 'london'];
+let groupNames = { la: 'LA Bowlers', london: 'London Bowlers' };
+let playersByGroup = { la: [], london: [] };
+let bettors = [];
+let pendingBet = null;      // { group, playerId, side, player }
+let pendingProposal = null; // { group, playerId, side, player }
 
-// Helper to append ?g= to any URL
-function gq(url) {
+// Append the group to a URL's query string.
+function gq(url, group) {
   const sep = url.includes('?') ? '&' : '?';
-  return url + sep + 'g=' + groupId;
+  return url + sep + 'g=' + group;
 }
 
 // Bettor credentials travel as headers, never in the query string — a URL with
@@ -142,88 +148,96 @@ function bettorHeaders(extra) {
   return Object.assign({ 'X-Bettor-Name': name, 'X-Bettor-Pin': pin }, extra || {});
 }
 
-let players = [];
-let bettors = [];
-let pendingBet = null; // { playerId, side, player }
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    const s = await res.json();
+    if (s.groupNames) groupNames = s.groupNames;
+  } catch (e) {}
+}
 
 async function loadBettors() {
-  const res = await fetch(gq('/api/bettors'));
+  const res = await fetch('/api/bettors');
   bettors = await res.json();
   const options = bettors.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
   document.getElementById('myName').innerHTML = '<option value="">Select your name to see your bets</option>' + options;
   document.getElementById('betName').innerHTML = '<option value="">Select your name</option>' + options;
+  document.getElementById('proposalName').innerHTML = '<option value="">Select your name</option>' + options;
 }
 
-const STATUS_LABELS = {
-  paused: 'Betting paused',
-  voided: 'Voided — no contest, refunds issued',
-  settled: null // handled specially with the final score
-};
-
 async function loadPlayers() {
-  const res = await fetch(gq('/api/players'));
-  players = await res.json();
+  await Promise.all(GROUPS.map(async group => {
+    const res = await fetch(gq('/api/players', group));
+    playersByGroup[group] = await res.json();
+  }));
   render();
 }
 
-// Returns HTML for one price side, handling finite-mode exhaustion.
-function priceSideHtml(p, side) {
+function findPlayer(group, playerId) {
+  return (playersByGroup[group] || []).find(p => p.id === playerId);
+}
+
+// Returns HTML for one price side, handling exhaustion + proposals.
+function priceSideHtml(p, side, group) {
   const isUnder = side === 'under';
   const level = isUnder ? p.bid : p.offer;
   const isOpen = p.status === 'open';
   const isExhausted = isUnder ? p.bidExhausted : p.offerExhausted;
-
   const canPropose = isUnder ? p.canProposeUnder : p.canProposeOver;
 
   if (!isOpen) {
     return `<span class="price ${side} disabled">${level}</span>`;
   }
   if (isExhausted) {
-    // Side has no liquidity — show greyed price and (if allowed) a Propose button.
     const proposeBtn = canPropose
-      ? `<button class="btn-interest" onclick="openProposalModal('${p.id}', '${side}')">Propose a bet</button>`
+      ? `<button class="btn-interest" onclick="openProposalModal('${p.id}', '${side}', '${group}')">Propose a bet</button>`
       : '';
     return `<span class="price ${side} disabled" style="opacity:0.35;">${level}</span>${proposeBtn}`;
   }
   const proposeBtn = canPropose
-    ? `<button class="btn-interest" onclick="openProposalModal('${p.id}', '${side}')">Propose</button>`
+    ? `<button class="btn-interest" onclick="openProposalModal('${p.id}', '${side}', '${group}')">Propose</button>`
     : '';
-  return `<span class="price ${side}" onclick='openModal(${JSON.stringify(p.id)}, "${side}")'>${level}</span>${proposeBtn}`;
+  return `<span class="price ${side}" onclick="openModal('${p.id}', '${side}', '${group}')">${level}</span>${proposeBtn}`;
 }
 
 function render() {
   const container = document.getElementById('players');
   container.innerHTML = '';
-  if (players.length === 0) {
-    container.innerHTML = '<div class="card small">No markets yet &mdash; check back once the market maker adds players.</div>';
-    return;
-  }
-  players.forEach(p => {
-    const div = document.createElement('div');
-    div.className = 'card player-card';
+  GROUPS.forEach(group => {
+    const title = document.createElement('div');
+    title.className = 'section-title';
+    title.textContent = groupNames[group] || group;
+    container.appendChild(title);
 
-    let statusBadge = '';
-    if (p.status === 'settled') {
-      statusBadge = `<span class="badge settled">Settled: ${p.finalScore}</span>`;
-    } else if (p.status === 'voided') {
-      statusBadge = `<span class="badge voided">Voided — refunds issued</span>`;
-    } else if (p.status === 'paused') {
-      statusBadge = `<span class="badge paused">Betting paused</span>`;
+    const list = playersByGroup[group] || [];
+    if (list.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'card small';
+      empty.innerHTML = 'No markets yet &mdash; check back once the market maker adds players.';
+      container.appendChild(empty);
+      return;
     }
-
-    div.innerHTML = `
-      <div>
-        <div class="player-name">${escapeHtml(p.name)}</div>
-        <div class="player-meta">${statusBadge}</div>
-      </div>
-      <div class="market rail" style="flex-wrap:wrap; gap:6px;">
-        ${priceSideHtml(p, 'under')}
-        <span class="slash">/</span>
-        ${priceSideHtml(p, 'over')}
-        <span class="size">${p.bidSize} x ${p.offerSize}</span>
-      </div>
-    `;
-    container.appendChild(div);
+    list.forEach(p => {
+      const div = document.createElement('div');
+      div.className = 'card player-card';
+      let statusBadge = '';
+      if (p.status === 'settled') statusBadge = `<span class="badge settled">Settled: ${p.finalScore}</span>`;
+      else if (p.status === 'voided') statusBadge = `<span class="badge voided">Voided — refunds issued</span>`;
+      else if (p.status === 'paused') statusBadge = `<span class="badge paused">Betting paused</span>`;
+      div.innerHTML = `
+        <div>
+          <div class="player-name">${escapeHtml(p.name)}</div>
+          <div class="player-meta">${statusBadge}</div>
+        </div>
+        <div class="market rail" style="flex-wrap:wrap; gap:6px;">
+          ${priceSideHtml(p, 'under', group)}
+          <span class="slash">/</span>
+          ${priceSideHtml(p, 'over', group)}
+          <span class="size">${p.bidSize} x ${p.offerSize}</span>
+        </div>
+      `;
+      container.appendChild(div);
+    });
   });
 }
 
@@ -235,9 +249,9 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-function openModal(playerId, side) {
-  const player = players.find(p => p.id === playerId);
-  pendingBet = { playerId, side, player };
+function openModal(playerId, side, group) {
+  const player = findPlayer(group, playerId);
+  pendingBet = { group, playerId, side, player };
   const line = side === 'under' ? player.bid : player.offer;
   const size = side === 'under' ? player.bidSize : player.offerSize;
   const verb = side === 'under' ? 'Hit the Bid' : 'Lift the Offer';
@@ -275,7 +289,7 @@ async function submitBet() {
     return;
   }
 
-  const res = await fetch(gq('/api/bets'), {
+  const res = await fetch(gq('/api/bets', pendingBet.group), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -324,19 +338,28 @@ async function loadMyBets(opts = {}) {
   errEl.classList.add('hidden');
   if (!name) return;
 
-  const betsRes = await fetch(gq('/api/bets'), { headers: bettorHeaders() });
-  if (betsRes.status === 401) {
+  // Bets live per group; fetch both and merge, tagging each with its group.
+  let unauthorized = false;
+  const all = [];
+  for (const group of GROUPS) {
+    const res = await fetch(gq('/api/bets', group), { headers: bettorHeaders() });
+    if (res.status === 401) { unauthorized = true; continue; }
+    if (!res.ok) continue;
+    const rows = await res.json();
+    rows.forEach(b => all.push({ ...b, _group: group }));
+  }
+  if (unauthorized && all.length === 0) {
     if (!opts.silent) errEl.classList.remove('hidden');
     return;
   }
-  const bets = await betsRes.json();
-  if (!betsRes.ok) return;
   localStorage.setItem('bettorPin', pin);
-  if (bets.length === 0) {
+  if (all.length === 0) {
     noBets.classList.remove('hidden');
     return;
   }
-  bets.forEach(b => {
+  all.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  all.forEach(b => {
     const tr = document.createElement('tr');
     const isProposal = b.kind === 'proposal';
     let line = '—';
@@ -346,8 +369,8 @@ async function loadMyBets(opts = {}) {
       if (b.status === 'proposal-countered' && b.counterPrice) {
         line = `<div style="font-size:11px; color:#9ca3af; line-height:1.5;">You: ${b.proposedLevel} ($${b.stake})</div><div style="font-size:13px; font-weight:700; color:#92400e; line-height:1.5;">↳ MM: ${b.counterPrice.level} ($${b.counterPrice.size})</div>`;
         actionCell = `
-          <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="answerProposalCounter('${b.id}', 'accept')">Accept</button>
-          <button class="btn danger" style="padding:3px 10px;font-size:12px;margin-left:4px;" onclick="answerProposalCounter('${b.id}', 'decline')">Decline</button>
+          <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="answerProposalCounter('${b.id}', 'accept', '${b._group}')">Accept</button>
+          <button class="btn danger" style="padding:3px 10px;font-size:12px;margin-left:4px;" onclick="answerProposalCounter('${b.id}', 'decline', '${b._group}')">Decline</button>
         `;
       } else if (b.status === 'open' && b.price) {
         line = b.side === 'under' ? b.price.bid : b.price.offer;
@@ -361,8 +384,8 @@ async function loadMyBets(opts = {}) {
       const ctrLevel = b.side === 'under' ? b.counterPrice.bid : b.counterPrice.offer;
       line = `<div style="font-size:11px; color:#9ca3af; line-height:1.5;">Req: ${reqLevel}</div><div style="font-size:13px; font-weight:700; color:#92400e; line-height:1.5;">↳ Counter: ${ctrLevel}</div>`;
       actionCell = `
-        <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="answerCounter('${b.id}', 'accept')">Accept</button>
-        <button class="btn danger" style="padding:3px 10px;font-size:12px;margin-left:4px;" onclick="answerCounter('${b.id}', 'decline')">Decline</button>
+        <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="answerCounter('${b.id}', 'accept', '${b._group}')">Accept</button>
+        <button class="btn danger" style="padding:3px 10px;font-size:12px;margin-left:4px;" onclick="answerCounter('${b.id}', 'decline', '${b._group}')">Decline</button>
       `;
     } else if (b.price) {
       line = b.side === 'under' ? b.price.bid : b.price.offer;
@@ -374,8 +397,9 @@ async function loadMyBets(opts = {}) {
     const statusLabel = b.status === 'proposal-countered' ? 'countered'
       : b.status === 'proposed' ? 'proposed'
       : b.status;
+    const groupTag = `<div class="small" style="color:#9ca3af;">${escapeHtml(groupNames[b._group] || b._group)}</div>`;
     tr.innerHTML = `
-      <td>${escapeHtml(b.playerName)}</td>
+      <td>${escapeHtml(b.playerName)}${groupTag}</td>
       <td>${b.side === 'under' ? 'Under' : 'Over'}</td>
       <td>${line}</td>
       <td>$${b.stake}</td>
@@ -390,15 +414,13 @@ async function loadMyBets(opts = {}) {
 
 // ---------- proposals (RFQ) ----------
 
-let pendingProposal = null; // { playerId, side, player }
-
-function openProposalModal(playerId, side) {
-  const player = players.find(p => p.id === playerId);
+function openProposalModal(playerId, side, group) {
+  const player = findPlayer(group, playerId);
   if (!player || player.status !== 'open') {
     showToast('Market is not currently open — refresh the page.');
     return;
   }
-  pendingProposal = { playerId, side, player };
+  pendingProposal = { group, playerId, side, player };
   const verb = side === 'under' ? 'Propose an Under' : 'Propose an Over';
   document.getElementById('proposalTitle').textContent = `${verb} on ${player.name}`;
   document.getElementById('proposalLevelLabel').textContent =
@@ -427,7 +449,7 @@ async function submitProposal() {
   const storedPin = (document.getElementById('myPin').value.trim()) || localStorage.getItem('bettorPin') || '';
   if (!storedPin) { errEl.textContent = 'Enter your PIN in "My Bets" below first.'; return; }
 
-  const res = await fetch(gq(`/api/players/${pendingProposal.playerId}/propose`), {
+  const res = await fetch(gq(`/api/players/${pendingProposal.playerId}/propose`, pendingProposal.group), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Bettor-Name': name, 'X-Bettor-Pin': storedPin },
     body: JSON.stringify({ side: pendingProposal.side, level, size })
@@ -444,9 +466,9 @@ async function submitProposal() {
   await loadMyBets({ silent: true });
 }
 
-async function answerProposalCounter(proposalId, action) {
+async function answerProposalCounter(proposalId, action, group) {
   const endpoint = action === 'accept' ? 'accept-counter' : 'decline-counter';
-  const res = await fetch(gq(`/api/proposals/${proposalId}/${endpoint}`), {
+  const res = await fetch(gq(`/api/proposals/${proposalId}/${endpoint}`, group), {
     method: 'POST',
     headers: bettorHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({})
@@ -463,9 +485,9 @@ async function answerProposalCounter(proposalId, action) {
   await loadPlayers();
 }
 
-async function answerCounter(betId, action) {
+async function answerCounter(betId, action, group) {
   const endpoint = action === 'accept' ? 'accept-counter' : 'decline-counter';
-  const res = await fetch(gq(`/api/bets/${betId}/${endpoint}`), {
+  const res = await fetch(gq(`/api/bets/${betId}/${endpoint}`, group), {
     method: 'POST',
     headers: bettorHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({})
@@ -483,6 +505,7 @@ async function answerCounter(betId, action) {
 }
 
 (async () => {
+  await loadSettings();
   await loadBettors();
   await loadPlayers();
   // Poll players every 5s; also silently refresh My Bets if a name is selected

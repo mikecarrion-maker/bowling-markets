@@ -48,6 +48,8 @@ function defaultData() {
       allowProposals: 'exhausted-only',
       groupNames: { la: 'LA Bowlers', london: 'London Bowlers' }
     },
+    // Bettors are a single global list: one name + PIN unlocks every group.
+    bettors: [],
     groups: {
       la: defaultGroup(),
       london: defaultGroup()
@@ -104,6 +106,32 @@ function normalize(data) {
     data.groups.la = normalizeGroup(data.groups.la);
     data.groups.london = normalizeGroup(data.groups.london);
   }
+
+  // One-time migration to a single global bettor list. Bettors used to live
+  // per-group, so anyone in both groups had two (possibly mismatched) PIN
+  // entries. Merge them by name; one PIN now unlocks both groups. A non-empty
+  // PIN wins over an empty one so nobody is locked out by the merge.
+  if (!Array.isArray(data.bettors)) {
+    const merged = new Map(); // lowercased name -> { name, pin }
+    ['la', 'london'].forEach(gid => {
+      const g = data.groups[gid];
+      (g && Array.isArray(g.bettors) ? g.bettors : []).forEach(b => {
+        const rec = (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' };
+        const key = rec.name.toLowerCase();
+        const existing = merged.get(key);
+        if (!existing) merged.set(key, rec);
+        else if (!existing.pin && rec.pin) existing.pin = rec.pin;
+      });
+    });
+    data.bettors = [...merged.values()];
+  }
+  // Normalise shape and drop the now-unused per-group lists so there's one
+  // source of truth.
+  data.bettors = data.bettors.map(b =>
+    (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' }
+  );
+  data.groups.la.bettors = [];
+  data.groups.london.bettors = [];
 
   return data;
 }
@@ -422,12 +450,12 @@ async function requireAdmin(req, res, next) {
 // Resolve and authenticate a bettor from request headers. Returns
 // { ok: true, bettor } or { ok: false, status, error }.
 // Callers MUST use this rather than trusting a name off the query string.
-function authenticateBettor(req, group) {
+function authenticateBettor(req, bettors) {
   const rawName = req.headers['x-bettor-name'];
   const name = rawName == null ? '' : String(rawName).trim();
   if (!name) return { ok: false, status: 401, error: 'sign in to view your bets' };
 
-  const bettor = group.bettors.find(b => b.name.toLowerCase() === name.toLowerCase());
+  const bettor = bettors.find(b => b.name.toLowerCase() === name.toLowerCase());
   if (!bettor) return { ok: false, status: 401, error: 'unknown bettor' };
 
   if (isLockedOut(req, 'bettor')) {
@@ -450,12 +478,12 @@ function authenticateBettor(req, group) {
   return { ok: true, bettor };
 }
 
-function sortedBettorNames(group) {
-  return group.bettors.map(b => b.name).sort((a, b) => a.localeCompare(b));
+function sortedBettorNames(data) {
+  return data.bettors.map(b => b.name).sort((a, b) => a.localeCompare(b));
 }
 
-function adminBettorList(group) {
-  return group.bettors
+function adminBettorList(data) {
+  return data.bettors
     .map(b => ({ name: b.name, pin: b.pin || '' }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -565,57 +593,53 @@ app.put('/api/settings', requireAdmin, async (req, res) => {
   res.json({ ...rest, passcodeSet: !!data.settings.adminPasscode });
 });
 
-// ---------- eligible bettors ----------
+// ---------- eligible bettors (global list) ----------
 
-// Public: list of names for the bettor-view dropdown. ?g=la|london
+// Public: list of names for the bettor-view dropdown. Bettors are global, so
+// the ?g param is ignored here.
 app.get('/api/bettors', async (req, res) => {
   const data = await loadData();
-  const group = getGroup(data, req.query.g);
-  res.json(sortedBettorNames(group));
+  res.json(sortedBettorNames(data));
 });
 
 // Admin: full list including whether each bettor has a PIN set.
 app.get('/api/admin/bettors', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const group = getGroup(data, req.query.g);
-  res.json(adminBettorList(group));
+  res.json(adminBettorList(data));
 });
 
 app.post('/api/bettors', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const group = getGroup(data, req.query.g);
   const { name, pin } = req.body;
   const trimmed = name == null ? '' : String(name).trim();
   if (!trimmed) return res.status(400).json({ error: 'name is required' });
-  if (group.bettors.some(b => b.name.toLowerCase() === trimmed.toLowerCase())) {
+  if (data.bettors.some(b => b.name.toLowerCase() === trimmed.toLowerCase())) {
     return res.status(400).json({ error: 'that name is already on the list' });
   }
-  group.bettors.push({ name: trimmed, pin: pin ? String(pin).trim() : '' });
+  data.bettors.push({ name: trimmed, pin: pin ? String(pin).trim() : '' });
   await saveData(data);
-  res.status(201).json(adminBettorList(group));
+  res.status(201).json(adminBettorList(data));
 });
 
 // Admin: set, change, or clear (empty pin) a bettor's PIN.
 app.put('/api/bettors/:name', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const group = getGroup(data, req.query.g);
   const target = req.params.name.toLowerCase();
-  const bettor = group.bettors.find(b => b.name.toLowerCase() === target);
+  const bettor = data.bettors.find(b => b.name.toLowerCase() === target);
   if (!bettor) return res.status(404).json({ error: 'name not found' });
   bettor.pin = req.body.pin ? String(req.body.pin).trim() : '';
   await saveData(data);
-  res.json(adminBettorList(group));
+  res.json(adminBettorList(data));
 });
 
 app.delete('/api/bettors/:name', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const group = getGroup(data, req.query.g);
   const target = req.params.name.toLowerCase();
-  const before = group.bettors.length;
-  group.bettors = group.bettors.filter(b => b.name.toLowerCase() !== target);
-  if (group.bettors.length === before) return res.status(404).json({ error: 'name not found' });
+  const before = data.bettors.length;
+  data.bettors = data.bettors.filter(b => b.name.toLowerCase() !== target);
+  if (data.bettors.length === before) return res.status(404).json({ error: 'name not found' });
   await saveData(data);
-  res.json(adminBettorList(group));
+  res.json(adminBettorList(data));
 });
 
 // ---------- players / markets ----------
@@ -873,7 +897,7 @@ app.get('/api/bets', async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
 
-  const auth = authenticateBettor(req, group);
+  const auth = authenticateBettor(req, data.bettors);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
 
   const mine = auth.bettor.name.toLowerCase();
@@ -911,7 +935,7 @@ app.post('/api/bets', async (req, res) => {
   // The bettor's identity comes from their authenticated PIN, not from the
   // request body. Previously any caller could submit a bet under someone
   // else's name and that person would be on the hook for the stake.
-  const auth = authenticateBettor(req, group);
+  const auth = authenticateBettor(req, data.bettors);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
   const canonicalName = auth.bettor.name;
 
@@ -1041,7 +1065,7 @@ app.post('/api/bets/:id/accept-counter', async (req, res) => {
 
   // Authenticate, then confirm the caller actually owns this bet — otherwise
   // any signed-in bettor could accept someone else's counter.
-  const auth = authenticateBettor(req, group);
+  const auth = authenticateBettor(req, data.bettors);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
   if (auth.bettor.name.toLowerCase() !== bet.bettorName.toLowerCase()) {
     return res.status(403).json({ error: 'not your bet' });
@@ -1066,7 +1090,7 @@ app.post('/api/bets/:id/decline-counter', async (req, res) => {
   if (!bet) return res.status(404).json({ error: 'bet not found' });
   if (bet.status !== 'countered') return res.status(400).json({ error: 'bet is not countered' });
 
-  const auth = authenticateBettor(req, group);
+  const auth = authenticateBettor(req, data.bettors);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
   if (auth.bettor.name.toLowerCase() !== bet.bettorName.toLowerCase()) {
     return res.status(403).json({ error: 'not your bet' });
@@ -1123,7 +1147,7 @@ app.post('/api/players/:id/propose', async (req, res) => {
     return res.status(400).json({ error: 'market is not open' });
   }
 
-  const auth = authenticateBettor(req, group);
+  const auth = authenticateBettor(req, data.bettors);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
   const canonicalName = auth.bettor.name;
 
@@ -1245,7 +1269,7 @@ app.post('/api/proposals/:id/accept-counter', async (req, res) => {
   if (!bet) return res.status(404).json({ error: 'proposal not found' });
   if (bet.status !== 'proposal-countered') return res.status(400).json({ error: 'proposal is not countered' });
 
-  const auth = authenticateBettor(req, group);
+  const auth = authenticateBettor(req, data.bettors);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
   if (auth.bettor.name.toLowerCase() !== bet.bettorName.toLowerCase()) {
     return res.status(403).json({ error: 'not your proposal' });
@@ -1269,7 +1293,7 @@ app.post('/api/proposals/:id/decline-counter', async (req, res) => {
   if (!bet) return res.status(404).json({ error: 'proposal not found' });
   if (bet.status !== 'proposal-countered') return res.status(400).json({ error: 'proposal is not countered' });
 
-  const auth = authenticateBettor(req, group);
+  const auth = authenticateBettor(req, data.bettors);
   if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
   if (auth.bettor.name.toLowerCase() !== bet.bettorName.toLowerCase()) {
     return res.status(403).json({ error: 'not your proposal' });
