@@ -1394,17 +1394,40 @@ document.getElementById('f').addEventListener('submit', async function (ev) {
 </body></html>`;
 }
 
+// Operational one-shot data reset, triggered by the RESET_DATA env var. Set it
+// to any token (e.g. "wipe-2026-07") in the Render environment to clear every
+// player, bet, and bettor on the next boot while KEEPING settings (sizes, group
+// names, proposal policy, passcode). It applies once per distinct token value:
+// once a token has run, restarts won't wipe again, so it's safe to leave set —
+// change the token to a new value to wipe again. No browser or sign-in needed.
+async function maybeResetData() {
+  const token = process.env.RESET_DATA;
+  if (!token) return;
+  const data = await loadData();
+  if (data.settings._resetApplied === token) return; // this token already ran
+  data.bettors = [];
+  data.groups.la = defaultGroup();
+  data.groups.london = defaultGroup();
+  data.settings._resetApplied = token;
+  await saveData(data);
+  console.log(`RESET_DATA token "${token}" applied: cleared all players, bets, and bettors (settings kept).`);
+}
+
 // Only start the HTTP server when run directly (node server.js). When this file
 // is require()'d by a test, we export the app and helpers instead of listening,
 // so tests can exercise the pure logic without opening a port or a DB.
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Bowling markets app running at http://localhost:${PORT}`);
-    console.log(`Admin dashboard:        http://localhost:${PORT}/admin`);
-  });
+  maybeResetData()
+    .catch(err => console.error('RESET_DATA failed:', err))
+    .finally(() => {
+      app.listen(PORT, () => {
+        console.log(`Bowling markets app running at http://localhost:${PORT}`);
+        console.log(`Admin dashboard:        http://localhost:${PORT}/admin`);
+      });
+    });
 }
 
 module.exports = {
   app, gradeBet, exposureRows, bettorExposureRows,
-  levelPrice, effectiveAllowProposals, normalize, defaultData
+  levelPrice, effectiveAllowProposals, normalize, defaultData, maybeResetData
 };
