@@ -40,6 +40,10 @@
     If your stake is bigger than the size shown, your bet goes to the market maker for approval before it's confirmed.
   </div>
 
+  <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+    <button class="btn secondary" id="refreshBtn" onclick="refreshNow()">↻ Refresh</button>
+  </div>
+
   <div id="players"></div>
 
   <div class="section-title">My Bets</div>
@@ -333,16 +337,20 @@ function showToast(msg) {
   setTimeout(() => t.classList.add('hidden'), 3500);
 }
 
+let _lastBetsSig = null;
 async function loadMyBets(opts = {}) {
   const name = document.getElementById('myName').value.trim();
   const pin = document.getElementById('myPin').value.trim();
   const body = document.getElementById('betsBody');
   const noBets = document.getElementById('noBets');
   const errEl = document.getElementById('betsError');
-  body.innerHTML = '';
-  noBets.classList.add('hidden');
-  errEl.classList.add('hidden');
-  if (!name) return;
+  if (!name) {
+    body.innerHTML = '';
+    noBets.classList.add('hidden');
+    errEl.classList.add('hidden');
+    _lastBetsSig = null;
+    return;
+  }
 
   // Bets live per group; fetch both and merge, tagging each with its group.
   let unauthorized = false;
@@ -359,11 +367,21 @@ async function loadMyBets(opts = {}) {
     return;
   }
   localStorage.setItem('bettorPin', pin);
+
+  all.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  // Change-detection: only touch the DOM when the bet list actually changed, so
+  // the 15s poll doesn't flicker the table.
+  const sig = JSON.stringify(all);
+  if (sig === _lastBetsSig) return;
+  _lastBetsSig = sig;
+
+  body.innerHTML = '';
+  noBets.classList.add('hidden');
+  errEl.classList.add('hidden');
   if (all.length === 0) {
     noBets.classList.remove('hidden');
     return;
   }
-  all.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
   all.forEach(b => {
     const tr = document.createElement('tr');
@@ -510,17 +528,32 @@ async function answerCounter(betId, action, group) {
   await loadPlayers();
 }
 
+async function refreshNow() {
+  const btn = document.getElementById('refreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '↻ Refreshing…'; }
+  try {
+    await loadPlayers();
+    if (document.getElementById('myName') && document.getElementById('myName').value) {
+      await loadMyBets();
+    }
+    showToast('Refreshed.');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
+  }
+}
+
 (async () => {
   await loadSettings();
   await loadBettors();
   await loadPlayers();
-  // Poll players every 5s; also silently refresh My Bets if a name is selected
+  // Gentle background refresh (change-detection means idle polls don't redraw);
+  // the Refresh button gives an instant pull.
   setInterval(() => {
     loadPlayers();
     if (document.getElementById('myName') && document.getElementById('myName').value) {
       loadMyBets({ silent: true });
     }
-  }, 5000);
+  }, 15000);
   const savedName = localStorage.getItem('bettorName');
   const savedPin = localStorage.getItem('bettorPin') || '';
   document.getElementById('myPin').value = savedPin;
