@@ -871,6 +871,11 @@ function calcCounterMarket(b) {
 }
 
 async function loadPending() {
+  // Capture any in-progress counter input before we re-render, so the auto-poll
+  // doesn't overwrite what the market maker is typing.
+  const typedCounterLevel = openCounterBetId
+    ? ((document.getElementById(`counter-level-${openCounterBetId}`) || {}).value)
+    : null;
   const res = await adminFetch(gg('/api/admin/pending'));
   pendingBets = await res.json();
   const body = document.getElementById('pendingBody');
@@ -947,20 +952,27 @@ async function loadPending() {
     body.appendChild(counterRow);
   });
 
-  // Restore counter form if one was open before the reload
+  // Restore counter form if one was open before the reload, preserving whatever
+  // the market maker had already typed (captured at the top of loadPending) so
+  // the 5s auto-refresh doesn't wipe an in-progress counter.
   if (openCounterBetId && pendingBets.find(b => b.id === openCounterBetId)) {
-    showCounter(openCounterBetId);
+    showCounter(openCounterBetId, typedCounterLevel);
   }
 }
 
-function showCounter(betId) {
+function showCounter(betId, presetValue) {
   const b = pendingBets.find(x => x.id === betId);
   if (!b) return;
   openCounterBetId = betId;
-  const { bid, offer } = calcCounterMarket(b);
-  const level = b.side === 'under' ? bid : offer;
   const el = document.getElementById(`counter-level-${betId}`);
-  if (el) el.value = level;
+  if (el) {
+    if (presetValue !== undefined && presetValue !== null && presetValue !== '') {
+      el.value = presetValue; // keep what was already typed
+    } else {
+      const { bid, offer } = calcCounterMarket(b);
+      el.value = b.side === 'under' ? bid : offer; // first open: algo suggestion
+    }
+  }
   const formEl = document.getElementById(`counter-form-${betId}`);
   if (formEl) formEl.classList.remove('hidden');
 }
@@ -1330,6 +1342,11 @@ async function loadProposals() {
   const tableEl = document.getElementById('proposalsTable');
   const none = document.getElementById('noProposals');
   if (!body) return;
+  // Preserve any in-progress counter input across the 5s auto-refresh.
+  const typedProposalCounter = openProposalCounterId ? {
+    level: (document.getElementById(`proposal-counter-level-${openProposalCounterId}`) || {}).value,
+    size:  (document.getElementById(`proposal-counter-size-${openProposalCounterId}`) || {}).value
+  } : null;
   const res = await adminFetch(gg('/api/admin/proposals'));
   openProposals = await res.json();
   body.innerHTML = '';
@@ -1402,6 +1419,14 @@ async function loadProposals() {
 
   if (openProposalCounterId && openProposals.find(p => p.id === openProposalCounterId && p.status === 'proposed')) {
     showProposalCounter(openProposalCounterId);
+    // Restore what the market maker had typed (the row was just re-rendered with
+    // its default values).
+    if (typedProposalCounter) {
+      const lv = document.getElementById(`proposal-counter-level-${openProposalCounterId}`);
+      const sz = document.getElementById(`proposal-counter-size-${openProposalCounterId}`);
+      if (lv && typedProposalCounter.level !== '' && typedProposalCounter.level != null) lv.value = typedProposalCounter.level;
+      if (sz && typedProposalCounter.size !== '' && typedProposalCounter.size != null) sz.value = typedProposalCounter.size;
+    }
   }
 }
 
