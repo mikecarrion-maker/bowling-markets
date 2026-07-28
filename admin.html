@@ -144,6 +144,7 @@
     <button class="group-tab" id="tab-london" onclick="switchGroup('london')">London Bowlers</button>
     <button class="group-tab" id="tab-sg" onclick="switchGroup('sg')">Singapore Bowlers</button>
     <button class="group-tab combined-tab" id="tab-combined" onclick="switchGroup('combined')">Combined</button>
+    <button class="btn secondary" id="refreshBtn" onclick="refreshNow()" style="margin-left:auto; align-self:center;">↻ Refresh</button>
   </div>
 
   <!-- Per-group content (shown for la / london) -->
@@ -1579,8 +1580,24 @@ async function init() {
   }
 }
 
+async function refreshNow() {
+  const btn = document.getElementById('refreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '↻ Refreshing…'; }
+  try {
+    await loadAll();
+    showToast('Refreshed.');
+  } catch (e) {
+    // adminFetch handles auth errors
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh'; }
+  }
+}
+
 init();
-setInterval(() => { loadAll().catch(() => {}); }, 5000);
+// Gentle background refresh so incoming bets/proposals still surface on their
+// own, plus the manual Refresh button for an instant pull. Change-detection
+// means idle polls don't redraw anything.
+setInterval(() => { loadAll().catch(() => {}); }, 15000);
 </script>
 </body>
 </html>
