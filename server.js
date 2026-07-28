@@ -29,6 +29,10 @@ app.get('/style.css', (req, res) => {
 
 // ---------- storage ----------
 
+// The groups the app runs. Add a new id here (and a default name below) to add
+// another section to both the bettor page and the dashboard.
+const GROUP_IDS = ['la', 'london', 'sg'];
+
 function defaultGroup() {
   return { players: [], bets: [], bettors: [] };
 }
@@ -46,13 +50,14 @@ function defaultData() {
       //   'anytime'                  - on any open side
       // Global default; each player can override via player.allowProposals.
       allowProposals: 'exhausted-only',
-      groupNames: { la: 'LA Bowlers', london: 'London Bowlers' }
+      groupNames: { la: 'LA Bowlers', london: 'London Bowlers', sg: 'Singapore Bowlers' }
     },
     // Bettors are a single global list: one name + PIN unlocks every group.
     bettors: [],
     groups: {
       la: defaultGroup(),
-      london: defaultGroup()
+      london: defaultGroup(),
+      sg: defaultGroup()
     }
   };
 }
@@ -81,7 +86,10 @@ function normalize(data) {
   const defaults = defaultData().settings;
   Object.keys(defaults).forEach(k => {
     if (k === 'groupNames') {
-      if (!data.settings.groupNames) data.settings.groupNames = defaults.groupNames;
+      if (!data.settings.groupNames) data.settings.groupNames = { ...defaults.groupNames };
+      else GROUP_IDS.forEach(gid => {
+        if (!data.settings.groupNames[gid]) data.settings.groupNames[gid] = defaults.groupNames[gid];
+      });
     } else if (data.settings[k] === undefined) {
       data.settings[k] = defaults[k];
     }
@@ -97,14 +105,14 @@ function normalize(data) {
           (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' }
         )
       },
-      london: defaultGroup()
+      london: defaultGroup(),
+      sg: defaultGroup()
     };
     delete data.players;
     delete data.bets;
     delete data.bettors;
   } else {
-    data.groups.la = normalizeGroup(data.groups.la);
-    data.groups.london = normalizeGroup(data.groups.london);
+    GROUP_IDS.forEach(gid => { data.groups[gid] = normalizeGroup(data.groups[gid]); });
   }
 
   // One-time migration to a single global bettor list. Bettors used to live
@@ -113,7 +121,7 @@ function normalize(data) {
   // PIN wins over an empty one so nobody is locked out by the merge.
   if (!Array.isArray(data.bettors)) {
     const merged = new Map(); // lowercased name -> { name, pin }
-    ['la', 'london'].forEach(gid => {
+    GROUP_IDS.forEach(gid => {
       const g = data.groups[gid];
       (g && Array.isArray(g.bettors) ? g.bettors : []).forEach(b => {
         const rec = (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' };
@@ -130,15 +138,14 @@ function normalize(data) {
   data.bettors = data.bettors.map(b =>
     (typeof b === 'string') ? { name: b, pin: '' } : { name: b.name, pin: b.pin || '' }
   );
-  data.groups.la.bettors = [];
-  data.groups.london.bettors = [];
+  GROUP_IDS.forEach(gid => { data.groups[gid].bettors = []; });
 
   return data;
 }
 
 // Return the group object for a given group id (defaults to 'la')
 function getGroup(data, groupId) {
-  return (groupId === 'london') ? data.groups.london : data.groups.la;
+  return (data.groups && data.groups[groupId]) ? data.groups[groupId] : data.groups.la;
 }
 
 let pool = null;
@@ -582,8 +589,9 @@ app.put('/api/settings', requireAdmin, async (req, res) => {
     data.settings.allowProposals = allowProposals === 'anytime' ? 'anytime' : 'exhausted-only';
   }
   if (groupNames) {
-    if (groupNames.la) data.settings.groupNames.la = String(groupNames.la).trim();
-    if (groupNames.london) data.settings.groupNames.london = String(groupNames.london).trim();
+    GROUP_IDS.forEach(gid => {
+      if (groupNames[gid]) data.settings.groupNames[gid] = String(groupNames[gid]).trim();
+    });
   }
   await saveData(data);
   const { adminPasscode: _omit, ...rest } = data.settings;
@@ -856,29 +864,25 @@ app.get('/api/admin/bettor-exposure', requireAdmin, async (req, res) => {
   res.json(bettorExposureRows(group));
 });
 
-// Combined summary across both groups
+// Combined summary across all groups
 app.get('/api/admin/summary', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const la     = exposureRows(data.groups.la);
-  const london  = exposureRows(data.groups.london);
-  const combined = [la.totals, london.totals].reduce((acc, t) => ({
-    stakesHeld: round2(acc.stakesHeld + t.stakesHeld),
-    underStakes: round2(acc.underStakes + t.underStakes),
-    overStakes:  round2(acc.overStakes  + t.overStakes),
-    netIfLow:    round2(acc.netIfLow    + t.netIfLow),
-    netIfHigh:   round2(acc.netIfHigh   + t.netIfHigh)
-  }), { stakesHeld: 0, underStakes: 0, overStakes: 0, netIfLow: 0, netIfHigh: 0 });
-
-  // Open markets per group for market runs display
-  const laMarkets    = data.groups.la.players.filter(p => p.status === 'open' || p.status === 'paused');
-  const londonMarkets = data.groups.london.players.filter(p => p.status === 'open' || p.status === 'paused');
-
-  res.json({
-    la:      { ...la,     markets: laMarkets.map(p => publicPlayer(p, data.settings))     },
-    london:  { ...london, markets: londonMarkets.map(p => publicPlayer(p, data.settings)) },
-    combined,
-    groupNames: data.settings.groupNames
+  const out = { combined: { stakesHeld: 0, underStakes: 0, overStakes: 0, netIfLow: 0, netIfHigh: 0 },
+                groupNames: data.settings.groupNames };
+  GROUP_IDS.forEach(gid => {
+    const ex = exposureRows(data.groups[gid]);
+    const markets = data.groups[gid].players.filter(p => p.status === 'open' || p.status === 'paused');
+    out[gid] = { ...ex, markets: markets.map(p => publicPlayer(p, data.settings)) };
+    const t = ex.totals;
+    out.combined = {
+      stakesHeld:  round2(out.combined.stakesHeld + t.stakesHeld),
+      underStakes: round2(out.combined.underStakes + t.underStakes),
+      overStakes:  round2(out.combined.overStakes + t.overStakes),
+      netIfLow:    round2(out.combined.netIfLow + t.netIfLow),
+      netIfHigh:   round2(out.combined.netIfHigh + t.netIfHigh)
+    };
   });
+  res.json(out);
 });
 
 // ---------- bets ----------
@@ -1403,8 +1407,7 @@ async function maybeResetData() {
   const data = await loadData();
   if (data.settings._resetApplied === token) return; // this token already ran
   data.bettors = [];
-  data.groups.la = defaultGroup();
-  data.groups.london = defaultGroup();
+  GROUP_IDS.forEach(gid => { data.groups[gid] = defaultGroup(); });
   data.settings._resetApplied = token;
   await saveData(data);
   console.log(`RESET_DATA token "${token}" applied: cleared all players, bets, and bettors (settings kept).`);

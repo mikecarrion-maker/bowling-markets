@@ -125,9 +125,9 @@
 <script>
 // Both groups are shown stacked on one page. Bettors are global now, so a
 // single name + PIN works across both.
-const GROUPS = ['la', 'london'];
-let groupNames = { la: 'LA Bowlers', london: 'London Bowlers' };
-let playersByGroup = { la: [], london: [] };
+const GROUPS = ['la', 'london', 'sg'];
+let groupNames = { la: 'LA Bowlers', london: 'London Bowlers', sg: 'Singapore Bowlers' };
+let playersByGroup = { la: [], london: [], sg: [] };
 let bettors = [];
 let pendingBet = null;      // { group, playerId, side, player }
 let pendingProposal = null; // { group, playerId, side, player }

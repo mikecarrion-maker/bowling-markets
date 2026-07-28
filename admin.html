@@ -130,6 +130,10 @@
         <label>London group name</label>
         <input id="groupNameLondon" type="text" style="width:160px;" placeholder="London Bowlers" />
       </div>
+      <div>
+        <label>Singapore group name</label>
+        <input id="groupNameSg" type="text" style="width:160px;" placeholder="Singapore Bowlers" />
+      </div>
       <button class="btn secondary" onclick="saveGroupNames()">Save names</button>
     </div>
   </div>
@@ -138,6 +142,7 @@
   <div class="group-tabs">
     <button class="group-tab active" id="tab-la" onclick="switchGroup('la')">LA Bowlers</button>
     <button class="group-tab" id="tab-london" onclick="switchGroup('london')">London Bowlers</button>
+    <button class="group-tab" id="tab-sg" onclick="switchGroup('sg')">Singapore Bowlers</button>
     <button class="group-tab combined-tab" id="tab-combined" onclick="switchGroup('combined')">Combined</button>
   </div>
 
@@ -440,7 +445,7 @@ function switchGroup(gid) {
   currentGroup = gid;
 
   // Update tab active state
-  ['la', 'london', 'combined'].forEach(g => {
+  ['la', 'london', 'sg', 'combined'].forEach(g => {
     document.getElementById('tab-' + g).classList.toggle('active', g === gid);
   });
 
@@ -449,10 +454,7 @@ function switchGroup(gid) {
   document.getElementById('groupView').classList.toggle('hidden', !isGroup);
   document.getElementById('combinedView').classList.toggle('hidden', isGroup);
 
-  // Update group name in header labels
-  const name = gid === 'combined' ? 'Combined' : groupNames[gid];
-  document.getElementById('tab-la').textContent = groupNames.la;
-  document.getElementById('tab-london').textContent = groupNames.london;
+  updateTabLabels();
 
   if (gid === 'combined') {
     loadCombined();
@@ -465,6 +467,7 @@ function switchGroup(gid) {
 function updateTabLabels() {
   document.getElementById('tab-la').textContent = groupNames.la;
   document.getElementById('tab-london').textContent = groupNames.london;
+  document.getElementById('tab-sg').textContent = groupNames.sg;
 }
 
 // ---------- settings ----------
@@ -484,6 +487,7 @@ async function loadSettings() {
     groupNames = s.groupNames;
     document.getElementById('groupNameLa').value = s.groupNames.la || 'LA Bowlers';
     document.getElementById('groupNameLondon').value = s.groupNames.london || 'London Bowlers';
+    document.getElementById('groupNameSg').value = s.groupNames.sg || 'Singapore Bowlers';
     updateTabLabels();
   }
 }
@@ -527,11 +531,12 @@ async function saveProposalSettings() {
 async function saveGroupNames() {
   const la = document.getElementById('groupNameLa').value.trim();
   const london = document.getElementById('groupNameLondon').value.trim();
-  if (!la || !london) { showToast('Enter names for both groups.'); return; }
+  const sg = document.getElementById('groupNameSg').value.trim();
+  if (!la || !london || !sg) { showToast('Enter names for all groups.'); return; }
   await adminFetch('/api/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ groupNames: { la, london } })
+    body: JSON.stringify({ groupNames: { la, london, sg } })
   });
   showToast('Group names saved.');
   await loadSettings();
@@ -1168,7 +1173,7 @@ async function loadCombined() {
   const data = await res.json();
   if (unchanged('combined', data)) return;
   const el = document.getElementById('combinedContent');
-  const gNames = data.groupNames || { la: 'LA Bowlers', london: 'London Bowlers' };
+  const gNames = data.groupNames || { la: 'LA Bowlers', london: 'London Bowlers', sg: 'Singapore Bowlers' };
 
   function summaryCards(t, label) {
     const cardStyle = (val) => `flex:1; min-width:120px; border-radius:8px; padding:12px 16px; background:${val >= 0 ? 'var(--green-bg)' : 'var(--red-bg)'};`;
@@ -1218,15 +1223,17 @@ async function loadCombined() {
     `;
   }
 
-  el.innerHTML = `
-    ${summaryCards(data.combined, '🌐 Combined Totals')}
-    <div class="section-title" style="margin-top:8px;">${escapeHtml(gNames.la)} — Open Markets</div>
-    <div class="card">${marketTable(data.la.markets, 'la')}</div>
-    ${summaryCards(data.la.totals, escapeHtml(gNames.la) + ' Exposure')}
-    <div class="section-title">${escapeHtml(gNames.london)} — Open Markets</div>
-    <div class="card">${marketTable(data.london.markets, 'london')}</div>
-    ${summaryCards(data.london.totals, escapeHtml(gNames.london) + ' Exposure')}
-  `;
+  const emptyTotals = { stakesHeld: 0, netIfLow: 0, netIfHigh: 0, underStakes: 0, overStakes: 0 };
+  const groupSections = ['la', 'london', 'sg'].map(gid => {
+    const g = data[gid] || { markets: [], totals: emptyTotals };
+    const label = escapeHtml(gNames[gid] || gid);
+    return `
+      <div class="section-title" style="margin-top:8px;">${label} — Open Markets</div>
+      <div class="card">${marketTable(g.markets, gid)}</div>
+      ${summaryCards(g.totals || emptyTotals, label + ' Exposure')}
+    `;
+  }).join('');
+  el.innerHTML = `${summaryCards(data.combined, '🌐 Combined Totals')}${groupSections}`;
 }
 
 // ---------- live market runs ----------
