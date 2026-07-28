@@ -370,6 +370,17 @@ let currentSettings = { standardSize: 10, moveIncrement: 1, shadingDollarsPerPoi
 let exposureByPlayer = {};
 let openCounterBetId = null;
 
+// Change-detection so the 5s auto-refresh only rebuilds a section when its data
+// actually changed. Without this the whole dashboard re-renders every poll,
+// which flickers visibly and can disrupt in-progress edits.
+const _lastRender = {};
+function unchanged(key, data) {
+  const sig = currentGroup + ':' + JSON.stringify(data);
+  if (_lastRender[key] === sig) return true;
+  _lastRender[key] = sig;
+  return false;
+}
+
 // Shorthand: add ?g=<currentGroup> to any URL
 function gg(url) {
   if (currentGroup === 'combined') return url;
@@ -561,6 +572,7 @@ async function clearPasscode() {
 async function loadBettors() {
   const res = await adminFetch(gg('/api/admin/bettors'));
   const bettors = await res.json();
+  if (unchanged('bettors', bettors)) return;
   const listEl = document.getElementById('bettorsList');
   listEl.innerHTML = '';
   if (bettors.length === 0) {
@@ -697,9 +709,11 @@ async function addPlayer() {
 async function loadPlayers() {
   const res = await adminFetch(gg('/api/admin/players'));
   players = await res.json();
-  renderPlayers();
-  renderMarketRuns();
-  renderMarketModeControls();
+  if (!unchanged('players', players)) {
+    renderPlayers();
+    renderMarketRuns();
+    renderMarketModeControls();
+  }
   loadProposals();
 }
 
@@ -878,6 +892,7 @@ async function loadPending() {
     : null;
   const res = await adminFetch(gg('/api/admin/pending'));
   pendingBets = await res.json();
+  if (unchanged('pending', pendingBets)) return;
   const body = document.getElementById('pendingBody');
   const badge = document.getElementById('pendingBadge');
   const noPending = document.getElementById('noPending');
@@ -1042,6 +1057,7 @@ async function cancelBet(betId) {
 async function loadExposure() {
   const res = await adminFetch(gg('/api/admin/exposure'));
   const data = await res.json();
+  if (unchanged('exposure', data)) { await loadBettorExposure(); return; }
   const body = document.getElementById('exposureBody');
   const foot = document.getElementById('exposureFoot');
   body.innerHTML = '';
@@ -1112,6 +1128,7 @@ async function loadBettorExposure() {
   if (!body || !foot) return;
   const res = await adminFetch(gg('/api/admin/bettor-exposure'));
   const data = await res.json();
+  if (unchanged('bettorExposure', data)) return;
   body.innerHTML = '';
   foot.innerHTML = '';
 
@@ -1149,6 +1166,7 @@ async function loadBettorExposure() {
 async function loadCombined() {
   const res = await adminFetch('/api/admin/summary');
   const data = await res.json();
+  if (unchanged('combined', data)) return;
   const el = document.getElementById('combinedContent');
   const gNames = data.groupNames || { la: 'LA Bowlers', london: 'London Bowlers' };
 
@@ -1349,6 +1367,7 @@ async function loadProposals() {
   } : null;
   const res = await adminFetch(gg('/api/admin/proposals'));
   openProposals = await res.json();
+  if (unchanged('proposals', openProposals)) return;
   body.innerHTML = '';
 
   if (!openProposals.length) {
@@ -1481,6 +1500,7 @@ async function loadBets() {
   const bets = await res.json();
   const body = document.getElementById('betsBody');
   const groupBy = document.getElementById('groupByPlayer') && document.getElementById('groupByPlayer').checked;
+  if (unchanged('bets', { bets, groupBy })) return;
   body.innerHTML = '';
 
   if (groupBy) {

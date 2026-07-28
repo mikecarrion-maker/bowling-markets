@@ -165,11 +165,17 @@ async function loadBettors() {
   document.getElementById('proposalName').innerHTML = '<option value="">Select your name</option>' + options;
 }
 
+// Change-detection so the 5s poll only redraws the market list when it actually
+// changed — otherwise the page visibly flickers every refresh.
+let _lastPlayersSig = null;
 async function loadPlayers() {
   await Promise.all(GROUPS.map(async group => {
     const res = await fetch(gq('/api/players', group));
     playersByGroup[group] = await res.json();
   }));
+  const sig = JSON.stringify(playersByGroup);
+  if (sig === _lastPlayersSig) return;
+  _lastPlayersSig = sig;
   render();
 }
 
