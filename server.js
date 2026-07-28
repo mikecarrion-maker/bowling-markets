@@ -458,23 +458,20 @@ function authenticateBettor(req, bettors) {
   const bettor = bettors.find(b => b.name.toLowerCase() === name.toLowerCase());
   if (!bettor) return { ok: false, status: 401, error: 'unknown bettor' };
 
-  if (isLockedOut(req, 'bettor')) {
-    return { ok: false, status: 429, error: 'Too many failed attempts. Try again in 15 minutes.' };
-  }
-
-  // A bettor with no PIN set cannot be authenticated at all — deny rather than
-  // waving them through, and surface it so the market maker sets one.
+  // NOTE: the per-IP failed-attempt lockout was removed from the bettor flow —
+  // normal fumbling (e.g. clicking Bet before a PIN is set) was locking people
+  // out. The wrong-PIN check below still applies; the admin passcode still has
+  // its own lockout in requireAdmin(). Revisit if brute-forcing 4-digit bettor
+  // PINs ever becomes a concern.
   if (!bettor.pin) {
     return { ok: false, status: 403, error: 'no PIN set for this bettor — ask the market maker to set one' };
   }
 
   const provided = req.headers['x-bettor-pin'];
   if (!safeEqual(provided == null ? '' : String(provided), bettor.pin)) {
-    recordFailure(req, 'bettor');
     return { ok: false, status: 401, error: 'incorrect pin' };
   }
 
-  clearFailures(req, 'bettor');
   return { ok: true, bettor };
 }
 
