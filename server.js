@@ -151,6 +151,17 @@ function getGroup(data, groupId) {
   return (data.groups && data.groups[groupId]) ? data.groups[groupId] : data.groups.la;
 }
 
+// Stash a deep-copied snapshot of the current bettors + all groups (bowlers and
+// bets) into data._backups before a destructive operation, so wipes and imports
+// are reversible. Kept out of settings so it's never returned by public GETs.
+// Retains the most recent few.
+function pushBackup(data, reason) {
+  if (!Array.isArray(data._backups)) data._backups = [];
+  const snap = JSON.parse(JSON.stringify({ bettors: data.bettors || [], groups: data.groups || {} }));
+  data._backups.unshift({ at: new Date().toISOString(), reason, bettors: snap.bettors, groups: snap.groups });
+  data._backups = data._backups.slice(0, 5);
+}
+
 let pool = null;
 let dbReady = null;
 
@@ -903,6 +914,47 @@ app.get('/api/admin/summary', requireAdmin, async (req, res) => {
   res.json(out);
 });
 
+// ---------- backup / restore ----------
+
+// Full snapshot of everything for download. Admin only.
+app.get('/api/admin/export', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  res.json(data);
+});
+
+// Replace everything from an uploaded backup. Snapshots the current data first
+// so the import itself can be undone.
+app.post('/api/admin/import', requireAdmin, async (req, res) => {
+  const incoming = req.body;
+  if (!incoming || typeof incoming !== 'object' || (!incoming.groups && !incoming.bettors)) {
+    return res.status(400).json({ error: "that doesn't look like a bowling-markets backup file" });
+  }
+  const current = await loadData();
+  pushBackup(current, 'pre-import');
+  const restored = normalize(incoming);
+  restored._backups = current._backups; // keep the safety history (incl. the pre-import snapshot)
+  await saveData(restored);
+  res.json({ ok: true });
+});
+
+// Undo: restore the most recent auto-snapshot (taken before the last wipe/import).
+app.post('/api/admin/restore-snapshot', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  if (!Array.isArray(data._backups) || data._backups.length === 0) {
+    return res.status(400).json({ error: 'no snapshot available to restore' });
+  }
+  const snap = data._backups[0];
+  pushBackup(data, 'pre-restore'); // so the restore is itself undoable
+  const restored = normalize({
+    settings: data.settings,
+    bettors: JSON.parse(JSON.stringify(snap.bettors || [])),
+    groups: JSON.parse(JSON.stringify(snap.groups || {}))
+  });
+  restored._backups = data._backups;
+  await saveData(restored);
+  res.json({ ok: true, restoredFrom: snap.at, reason: snap.reason });
+});
+
 // ---------- bets ----------
 
 // A bettor's own bets. Always scoped to the authenticated bettor.
@@ -1424,6 +1476,7 @@ async function maybeResetData() {
   if (!token) return;
   const data = await loadData();
   if (data.settings._resetApplied === token) return; // this token already ran
+  pushBackup(data, 'pre-reset:' + token); // keep the wiped data recoverable
   data.bettors = [];
   GROUP_IDS.forEach(gid => { data.groups[gid] = defaultGroup(); });
   data.settings._resetApplied = token;
