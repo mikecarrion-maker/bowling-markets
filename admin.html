@@ -193,27 +193,32 @@
       </div>
     </div>
 
-    <div class="section-title">Exposure</div>
+    <div class="section-title">Exposure by bowler</div>
     <div class="card small" style="margin-bottom:8px;">
-      "Net if low" / "Net if high" show your P&amp;L on open bets if the score lands below every bid (under bets win)
-      or above every offer (over bets win). Positive = you keep money, negative = you pay out more than you hold.
+      "Net exposure" is your directional lean on open bets, agnostic to the line or final score:
+      over stakes minus under stakes. <strong>Over</strong> = you're exposed to the bowler scoring high;
+      <strong>under</strong> = exposed to the downside. Flat = balanced book.
     </div>
     <div id="exposureSummary" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;"></div>
     <div class="card" style="overflow-x:auto;">
       <table>
         <thead>
-          <tr><th>Player</th><th>Stakes held</th><th>Under stakes</th><th>Over stakes</th><th>Net if low</th><th>Net if high</th></tr>
+          <tr><th>Player</th><th>Stakes held</th><th>Under stakes</th><th>Over stakes</th><th>Net exposure</th></tr>
         </thead>
         <tbody id="exposureBody"></tbody>
         <tfoot id="exposureFoot"></tfoot>
       </table>
     </div>
 
-    <div style="font-size:11px; color:var(--grey); font-weight:700; letter-spacing:0.06em; margin:18px 0 8px;">BY BETTOR <span class="small" style="font-weight:400; letter-spacing:0;">(counterparty risk &mdash; who owes whom at the end of the night)</span></div>
+    <div class="section-title" style="margin-top:20px;">Exposure by bettor</div>
+    <div class="card small" style="margin-bottom:8px;">
+      Counterparty risk &mdash; who owes whom. <strong>Net exposure</strong> is each bettor's directional lean
+      (over minus under). <strong>Settled balance</strong> is the running amount to square up (+ = you owe them).
+    </div>
     <div class="card" style="overflow-x:auto;">
       <table>
         <thead>
-          <tr><th>Bettor</th><th>Open stake</th><th>Net if their unders come in</th><th>Net if their overs come in</th><th>Settled balance</th></tr>
+          <tr><th>Bettor</th><th>Open stake</th><th>Net exposure</th><th>Settled balance</th></tr>
         </thead>
         <tbody id="bettorExposureBody"></tbody>
         <tfoot id="bettorExposureFoot"></tfoot>
@@ -1060,6 +1065,15 @@ async function cancelBet(betId) {
 
 // ---------- exposure ----------
 
+// Net exposure shown as a directional figure: "$X over" (leaning over, exposed
+// to the high side), "$Y under", or "flat".
+function netExposureHtml(v) {
+  const n = Math.round(v * 100) / 100;
+  if (n > 0) return `<span style="color:var(--green); font-weight:600;">$${n} over</span>`;
+  if (n < 0) return `<span style="color:var(--red); font-weight:600;">$${Math.abs(n)} under</span>`;
+  return `<span style="color:#9ca3af;">flat</span>`;
+}
+
 async function loadExposure() {
   const res = await adminFetch(gg('/api/admin/exposure'));
   const data = await res.json();
@@ -1079,8 +1093,7 @@ async function loadExposure() {
       <td>$${r.stakesHeld}</td>
       <td>$${r.underStakes}</td>
       <td>$${r.overStakes}</td>
-      <td class="exposure-net ${r.netIfLow >= 0 ? 'positive' : 'negative'}">$${r.netIfLow}</td>
-      <td class="exposure-net ${r.netIfHigh >= 0 ? 'positive' : 'negative'}">$${r.netIfHigh}</td>
+      <td>${netExposureHtml(r.netExposure)}</td>
     `;
     body.appendChild(tr);
   });
@@ -1088,7 +1101,7 @@ async function loadExposure() {
   const summaryEl = document.getElementById('exposureSummary');
 
   if (data.rows.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" class="small">No open markets with bets yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="5" class="small">No open markets with bets yet.</td></tr>';
     foot.innerHTML = '';
     summaryEl.innerHTML = '';
     return;
@@ -1101,25 +1114,22 @@ async function loadExposure() {
       <td>$${t.stakesHeld}</td>
       <td>$${t.underStakes}</td>
       <td>$${t.overStakes}</td>
-      <td class="exposure-net ${t.netIfLow >= 0 ? 'positive' : 'negative'}">$${t.netIfLow}</td>
-      <td class="exposure-net ${t.netIfHigh >= 0 ? 'positive' : 'negative'}">$${t.netIfHigh}</td>
+      <td>${netExposureHtml(t.netExposure)}</td>
     </tr>
   `;
 
-  const cardStyle = (val) => `flex:1; min-width:130px; border-radius:8px; padding:12px 16px; background:${val >= 0 ? 'var(--green-bg)' : 'var(--red-bg)'};`;
-  const valStyle = (val) => `font-size:24px; font-weight:700; color:${val >= 0 ? 'var(--green)' : 'var(--red)'};`;
+  const ne = t.netExposure;
+  const neColor = ne > 0 ? 'var(--green)' : ne < 0 ? 'var(--red)' : '#6b7280';
+  const neText = ne > 0 ? `$${ne} over` : ne < 0 ? `$${Math.abs(ne)} under` : 'flat';
+  const neBg = ne > 0 ? 'var(--green-bg)' : ne < 0 ? 'var(--red-bg)' : '#f3f4f6';
   summaryEl.innerHTML = `
     <div style="flex:1; min-width:130px; border-radius:8px; padding:12px 16px; background:#f3f4f6;">
       <div class="small">Stakes held</div>
       <div style="font-size:24px; font-weight:700;">$${t.stakesHeld}</div>
     </div>
-    <div style="${cardStyle(t.netIfLow)}">
-      <div class="small">Worst case (all low)</div>
-      <div style="${valStyle(t.netIfLow)}">$${t.netIfLow}</div>
-    </div>
-    <div style="${cardStyle(t.netIfHigh)}">
-      <div class="small">Worst case (all high)</div>
-      <div style="${valStyle(t.netIfHigh)}">$${t.netIfHigh}</div>
+    <div style="flex:1; min-width:130px; border-radius:8px; padding:12px 16px; background:${neBg};">
+      <div class="small">Net exposure</div>
+      <div style="font-size:24px; font-weight:700; color:${neColor};">${neText}</div>
     </div>
   `;
 
@@ -1141,7 +1151,7 @@ async function loadBettorExposure() {
   const signed = (v) => `<td class="exposure-net ${v >= 0 ? 'positive' : 'negative'}">$${v}</td>`;
 
   if (!data.rows || data.rows.length === 0) {
-    body.innerHTML = '<tr><td colspan="5" class="small">No bettor activity yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="4" class="small">No bettor activity yet.</td></tr>';
     return;
   }
   data.rows.forEach(r => {
@@ -1149,8 +1159,7 @@ async function loadBettorExposure() {
     tr.innerHTML = `
       <td>${escapeHtml(r.name)}</td>
       <td>$${r.openStake}</td>
-      ${signed(r.netIfUnders)}
-      ${signed(r.netIfOvers)}
+      <td>${netExposureHtml(r.netExposure)}</td>
       ${signed(r.settledBalance)}
     `;
     body.appendChild(tr);
@@ -1160,8 +1169,7 @@ async function loadBettorExposure() {
     <tr style="font-weight:600;">
       <td>Total</td>
       <td>$${t.openStake}</td>
-      ${signed(t.netIfUnders)}
-      ${signed(t.netIfOvers)}
+      <td>${netExposureHtml(t.netExposure)}</td>
       ${signed(t.settledBalance)}
     </tr>
   `;
@@ -1186,13 +1194,9 @@ async function loadCombined() {
           <div class="small">Stakes held</div>
           <div style="font-size:22px; font-weight:700;">$${t.stakesHeld}</div>
         </div>
-        <div style="${cardStyle(t.netIfLow)}">
-          <div class="small">Worst case (all low)</div>
-          <div style="${valStyle(t.netIfLow)}">$${t.netIfLow}</div>
-        </div>
-        <div style="${cardStyle(t.netIfHigh)}">
-          <div class="small">Worst case (all high)</div>
-          <div style="${valStyle(t.netIfHigh)}">$${t.netIfHigh}</div>
+        <div style="${cardStyle(t.netExposure)}">
+          <div class="small">Net exposure</div>
+          <div style="${valStyle(t.netExposure)}">${t.netExposure > 0 ? '$' + t.netExposure + ' over' : t.netExposure < 0 ? '$' + Math.abs(t.netExposure) + ' under' : 'flat'}</div>
         </div>
         <div style="flex:1; min-width:120px; border-radius:8px; padding:12px 16px; background:#f3f4f6;">
           <div class="small">Under stakes</div>
@@ -1224,7 +1228,7 @@ async function loadCombined() {
     `;
   }
 
-  const emptyTotals = { stakesHeld: 0, netIfLow: 0, netIfHigh: 0, underStakes: 0, overStakes: 0 };
+  const emptyTotals = { stakesHeld: 0, netExposure: 0, underStakes: 0, overStakes: 0 };
   const groupSections = ['la', 'london', 'sg'].map(gid => {
     const g = data[gid] || { markets: [], totals: emptyTotals };
     const label = escapeHtml(gNames[gid] || gid);

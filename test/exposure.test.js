@@ -11,15 +11,14 @@ function group(bets, bettors) {
   return { players: [], bets, bettors: bettors || [] };
 }
 
-t('open stake and directional nets are computed per bettor', () => {
+t('open stake and net exposure are computed per bettor', () => {
   const g = group([
     { bettorName: 'Ann', side: 'under', stake: 10, status: 'open' },
     { bettorName: 'Ann', side: 'over',  stake: 4,  status: 'open' },
   ]);
   const ann = bettorExposureRows(g).rows.find(r => r.name === 'Ann');
   assert.strictEqual(ann.openStake, 14);
-  assert.strictEqual(ann.netIfUnders, 6);   // 10 under - 4 over
-  assert.strictEqual(ann.netIfOvers, -6);   // 4 over - 10 under
+  assert.strictEqual(ann.netExposure, -6);  // 4 over - 10 under -> net under
 });
 
 t('settled balance sums realised even-money P&L', () => {
@@ -51,7 +50,7 @@ t('totals aggregate across bettors', () => {
   ]);
   const { totals } = bettorExposureRows(g);
   assert.strictEqual(totals.openStake, 16);
-  assert.strictEqual(totals.netIfUnders, 4); // Ann +10, Bo -6
+  assert.strictEqual(totals.netExposure, -4); // Ann -10 (under), Bo +6 (over)
 });
 
 if (failed > 0) { console.error('\n' + failed + ' test(s) failed'); process.exit(1); }

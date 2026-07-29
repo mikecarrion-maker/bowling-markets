@@ -512,17 +512,18 @@ function exposureRows(group) {
       const underStakes = round2(openBets.filter(b => b.side === 'under').reduce((s, b) => s + b.stake, 0));
       const overStakes  = round2(openBets.filter(b => b.side === 'over').reduce((s, b) => s + b.stake, 0));
       const stakesHeld  = round2(underStakes + overStakes);
-      const netIfLow    = round2(overStakes - underStakes);
-      const netIfHigh   = round2(underStakes - overStakes);
-      return { playerId: p.id, name: p.name, stakesHeld, underStakes, overStakes, netIfLow, netIfHigh };
+      // Net exposure from the market maker's perspective, agnostic to level and
+      // final score: positive = the book leans over (house loses if the bowler
+      // scores high), negative = leans under.
+      const netExposure = round2(overStakes - underStakes);
+      return { playerId: p.id, name: p.name, stakesHeld, underStakes, overStakes, netExposure };
     });
   const totals = rows.reduce((acc, r) => ({
     stakesHeld: round2(acc.stakesHeld + r.stakesHeld),
     underStakes: round2(acc.underStakes + r.underStakes),
     overStakes:  round2(acc.overStakes  + r.overStakes),
-    netIfLow:    round2(acc.netIfLow    + r.netIfLow),
-    netIfHigh:   round2(acc.netIfHigh   + r.netIfHigh)
-  }), { stakesHeld: 0, underStakes: 0, overStakes: 0, netIfLow: 0, netIfHigh: 0 });
+    netExposure: round2(acc.netExposure + r.netExposure)
+  }), { stakesHeld: 0, underStakes: 0, overStakes: 0, netExposure: 0 });
   return { rows, totals };
 }
 
@@ -531,9 +532,8 @@ function exposureRows(group) {
 //
 // For each bettor, from Mike's (the house's) point of view:
 //   openStake      - money they currently have live across all open bets
-//   netIfUnders    - net if all their OPEN unders come in (unders win, overs lose):
-//                    + = the house owes them, - = they owe the house
-//   netIfOvers     - net if all their OPEN overs come in
+//   netExposure    - directional lean of their open bets, MM's perspective:
+//                    over stakes minus under stakes (+ = this bettor is net over)
 //   settledBalance - realised P&L to date across already-graded bets; this is the
 //                    running number Mike squares up from. + = house owes them.
 // Payouts are even money, so a won bet nets +stake to the bettor, a lost bet
@@ -550,12 +550,11 @@ function bettorExposureRows(group) {
     const underStakes = round2(open.filter(b => b.side === 'under').reduce((s, b) => s + b.stake, 0));
     const overStakes  = round2(open.filter(b => b.side === 'over').reduce((s, b) => s + b.stake, 0));
     const openStake   = round2(underStakes + overStakes);
-    const netIfUnders = round2(underStakes - overStakes);
-    const netIfOvers  = round2(overStakes - underStakes);
+    const netExposure = round2(overStakes - underStakes);
     const settledBalance = round2(mine
       .filter(b => SETTLED.includes(b.status))
       .reduce((s, b) => s + ((b.payout == null ? 0 : b.payout) - b.stake), 0));
-    return { name, openStake, underStakes, overStakes, netIfUnders, netIfOvers, settledBalance };
+    return { name, openStake, underStakes, overStakes, netExposure, settledBalance };
   })
   // Hide bettors with nothing live and nothing settled — keeps the table to
   // people actually in action.
@@ -564,10 +563,9 @@ function bettorExposureRows(group) {
 
   const totals = rows.reduce((acc, r) => ({
     openStake:      round2(acc.openStake + r.openStake),
-    netIfUnders:    round2(acc.netIfUnders + r.netIfUnders),
-    netIfOvers:     round2(acc.netIfOvers + r.netIfOvers),
+    netExposure:    round2(acc.netExposure + r.netExposure),
     settledBalance: round2(acc.settledBalance + r.settledBalance)
-  }), { openStake: 0, netIfUnders: 0, netIfOvers: 0, settledBalance: 0 });
+  }), { openStake: 0, netExposure: 0, settledBalance: 0 });
 
   return { rows, totals };
 }
@@ -888,7 +886,7 @@ app.get('/api/admin/bettor-exposure', requireAdmin, async (req, res) => {
 // Combined summary across all groups
 app.get('/api/admin/summary', requireAdmin, async (req, res) => {
   const data = await loadData();
-  const out = { combined: { stakesHeld: 0, underStakes: 0, overStakes: 0, netIfLow: 0, netIfHigh: 0 },
+  const out = { combined: { stakesHeld: 0, underStakes: 0, overStakes: 0, netExposure: 0 },
                 groupNames: data.settings.groupNames };
   GROUP_IDS.forEach(gid => {
     const ex = exposureRows(data.groups[gid]);
@@ -899,8 +897,7 @@ app.get('/api/admin/summary', requireAdmin, async (req, res) => {
       stakesHeld:  round2(out.combined.stakesHeld + t.stakesHeld),
       underStakes: round2(out.combined.underStakes + t.underStakes),
       overStakes:  round2(out.combined.overStakes + t.overStakes),
-      netIfLow:    round2(out.combined.netIfLow + t.netIfLow),
-      netIfHigh:   round2(out.combined.netIfHigh + t.netIfHigh)
+      netExposure: round2(out.combined.netExposure + t.netExposure)
     };
   });
   res.json(out);
