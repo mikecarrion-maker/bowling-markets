@@ -933,6 +933,11 @@ app.post('/api/admin/import', requireAdmin, async (req, res) => {
   pushBackup(current, 'pre-import');
   const restored = normalize(incoming);
   restored._backups = current._backups; // keep the safety history (incl. the pre-import snapshot)
+  // Preserve the signed-session secret so importing a backup doesn't log the
+  // market maker out (the admin cookie is signed with it).
+  if (current.settings && current.settings.sessionSecret) {
+    restored.settings.sessionSecret = current.settings.sessionSecret;
+  }
   await saveData(restored);
   res.json({ ok: true });
 });
