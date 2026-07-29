@@ -461,18 +461,16 @@ async function requireAdmin(req, res, next) {
       error: 'Admin is locked: no passcode configured. Set ADMIN_PASSCODE in the server environment and restart.'
     });
   }
-  if (isLockedOut(req, 'admin')) {
-    return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
-  }
+  // The per-IP failed-attempt lockout was removed at the owner's request — it was
+  // locking the market maker out mid-setup. The passcode check below still gates
+  // all admin access.
   if (hasAdminCookie(req, data)) return next();
 
   const provided = req.headers['x-admin-passcode'] || '';
   if (provided && safeEqual(provided, passcode)) {
-    clearFailures(req, 'admin');
     return next();
   }
 
-  recordFailure(req, 'admin');
   return res.status(401).json({ error: 'admin passcode required' });
 }
 
@@ -1393,14 +1391,9 @@ app.post('/api/admin/login', async (req, res) => {
   if (!passcode) {
     return res.status(503).json({ error: 'Admin is locked: no passcode configured. Set ADMIN_PASSCODE in the server environment.' });
   }
-  if (isLockedOut(req, 'admin')) {
-    return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
-  }
   if (!safeEqual(req.body && req.body.passcode, passcode)) {
-    recordFailure(req, 'admin');
     return res.status(401).json({ error: 'incorrect passcode' });
   }
-  clearFailures(req, 'admin');
 
   const token = adminToken(data);
   await saveData(data); // persists sessionSecret on first login
