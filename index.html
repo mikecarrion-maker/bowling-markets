@@ -234,16 +234,32 @@ function render() {
       if (p.status === 'settled') statusBadge = `<span class="badge settled">Settled: ${p.finalScore}</span>`;
       else if (p.status === 'voided') statusBadge = `<span class="badge voided">Voided — refunds issued</span>`;
       else if (p.status === 'paused') statusBadge = `<span class="badge paused">Betting paused</span>`;
+      const trades = p.trades || 0;
+      const chg = p.midChange || 0;
+      const chgColor = chg > 0 ? 'var(--green)' : chg < 0 ? 'var(--red)' : '#9ca3af';
+      const chgText = (chg > 0 ? '+' : '') + chg;
+      const stats = `
+        <div class="market-stats small" style="display:flex; gap:12px; align-items:center; color:#6b7280; margin-top:6px;">
+          <span title="Number of trades on this market">${trades} ${trades === 1 ? 'trade' : 'trades'}</span>
+          <span title="Change in the mid since this market opened (opened at ${p.openingMid})">
+            <span style="color:#9ca3af;">since open</span>
+            <span style="color:${chgColor}; font-weight:600;">${chgText}</span>
+          </span>
+        </div>
+      `;
       div.innerHTML = `
         <div>
           <div class="player-name">${escapeHtml(p.name)}</div>
           <div class="player-meta">${statusBadge}</div>
         </div>
-        <div class="market rail" style="flex-wrap:wrap; gap:6px;">
-          ${priceSideHtml(p, 'under', group)}
-          <span class="slash">/</span>
-          ${priceSideHtml(p, 'over', group)}
-          <span class="size">${p.bidSize} x ${p.offerSize}</span>
+        <div style="display:flex; flex-direction:column; align-items:flex-end;">
+          <div class="market rail" style="flex-wrap:wrap; gap:6px;">
+            ${priceSideHtml(p, 'under', group)}
+            <span class="slash">/</span>
+            ${priceSideHtml(p, 'over', group)}
+            <span class="size">${p.bidSize} x ${p.offerSize}</span>
+          </div>
+          ${stats}
         </div>
       `;
       container.appendChild(div);

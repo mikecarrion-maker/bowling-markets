@@ -74,7 +74,10 @@ function normalizeGroup(g) {
   g.players = g.players.map(p => ({
     ...p,
     mode: p.mode || 'algo',
-    allowProposals: p.allowProposals === undefined ? null : p.allowProposals
+    allowProposals: p.allowProposals === undefined ? null : p.allowProposals,
+    // Back-fill the opening mid for markets created before this was tracked, so
+    // "since open" starts from their current line rather than breaking.
+    openingMid: (p.openingMid != null) ? p.openingMid : round2((p.bid + p.offer) / 2)
   }));
   if (!Array.isArray(g.bets)) g.bets = [];
   return g;
@@ -242,6 +245,12 @@ function publicPlayer(p, settings) {
   const bidExhausted = mode === 'finite' && p.bidSize <= 0;
   const offerExhausted = mode === 'finite' && p.offerSize <= 0;
   const allowProposals = effectiveAllowProposals(p, settings || {});
+  // "Since open" market colour: how far the mid has moved from where the market
+  // first opened. openingMid is stamped at creation (and back-filled for older
+  // markets in normalizeGroup).
+  const currentMid = round2((p.bid + p.offer) / 2);
+  const openingMid = (p.openingMid != null) ? p.openingMid : currentMid;
+  const midChange = round2(currentMid - openingMid);
   return {
     id: p.id,
     name: p.name,
@@ -251,6 +260,8 @@ function publicPlayer(p, settings) {
     offerSize: p.offerSize,
     status: p.status,
     finalScore: p.finalScore,
+    openingMid,
+    midChange,
     mode,
     // In finite mode, tell the bettor view when a side has no more liquidity
     bidExhausted,
@@ -650,10 +661,18 @@ app.delete('/api/bettors/:name', requireAdmin, async (req, res) => {
 // ---------- players / markets ----------
 
 // Public list (bettor view). ?g=la|london
+// Statuses that mean a bet actually filled (a real trade happened), as opposed
+// to pending/declined requests or open proposals that never traded.
+const FILLED_STATUSES = ['open', 'won', 'lost', 'push', 'cancelled', 'voided'];
+
 app.get('/api/players', async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
-  res.json(group.players.map(p => publicPlayer(p, data.settings)));
+  const trades = {};
+  group.bets.forEach(b => {
+    if (FILLED_STATUSES.includes(b.status)) trades[b.playerId] = (trades[b.playerId] || 0) + 1;
+  });
+  res.json(group.players.map(p => ({ ...publicPlayer(p, data.settings), trades: trades[p.id] || 0 })));
 });
 
 // Full detail (admin view)
@@ -694,6 +713,8 @@ app.post('/api/players', requireAdmin, async (req, res) => {
     mode: mode === 'algo' ? 'algo' : 'finite', // 'algo' | 'finite'
     allowProposals: allowProposals === 'anytime' ? 'anytime'
                   : allowProposals === 'exhausted-only' ? 'exhausted-only' : null, // null = use global
+    // The mid this market first opened at — fixed for the life of the market.
+    openingMid: round2((Number(bid) + Number(offer)) / 2),
     status: 'open', // open | paused | voided | settled
     finalScore: null
   };
