@@ -668,9 +668,10 @@ app.delete('/api/bettors/:name', requireAdmin, async (req, res) => {
 // ---------- players / markets ----------
 
 // Public list (bettor view). ?g=la|london
-// Statuses that mean a bet actually filled (a real trade happened), as opposed
-// to pending/declined requests or open proposals that never traded.
-const FILLED_STATUSES = ['open', 'won', 'lost', 'push', 'cancelled', 'voided'];
+// Statuses that count toward the per-bowler trade tally: trades that stand.
+// Excludes pending/declined requests and proposals that never traded, and also
+// cancelled/voided bets, which were unwound and refunded so they shouldn't count.
+const FILLED_STATUSES = ['open', 'won', 'lost', 'push'];
 
 app.get('/api/players', async (req, res) => {
   const data = await loadData();
