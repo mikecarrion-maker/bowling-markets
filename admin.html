@@ -311,10 +311,14 @@
 
     <div class="section-title">All Bets</div>
     <div class="card" style="overflow-x:auto;">
-      <div style="margin-bottom:10px;">
+      <div style="margin-bottom:10px; display:flex; gap:18px; flex-wrap:wrap;">
         <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; width:fit-content;">
           <input type="checkbox" id="groupByPlayer" onchange="loadBets()" />
           Group by player
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; width:fit-content;">
+          <input type="checkbox" id="hideDeclined" onchange="loadBets()" />
+          Hide declined
         </label>
       </div>
       <table>
@@ -1509,10 +1513,12 @@ async function declineProposal(id) {
 
 async function loadBets() {
   const res = await adminFetch(gg('/api/admin/bets'));
-  const bets = await res.json();
+  let bets = await res.json();
   const body = document.getElementById('betsBody');
   const groupBy = document.getElementById('groupByPlayer') && document.getElementById('groupByPlayer').checked;
-  if (unchanged('bets', { bets, groupBy })) return;
+  const hideDeclined = document.getElementById('hideDeclined') && document.getElementById('hideDeclined').checked;
+  if (hideDeclined) bets = bets.filter(b => b.status !== 'declined');
+  if (unchanged('bets', { bets, groupBy, hideDeclined })) return;
   body.innerHTML = '';
 
   if (groupBy) {
