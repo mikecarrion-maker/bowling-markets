@@ -933,10 +933,13 @@ app.post('/api/admin/import', requireAdmin, async (req, res) => {
   pushBackup(current, 'pre-import');
   const restored = normalize(incoming);
   restored._backups = current._backups; // keep the safety history (incl. the pre-import snapshot)
-  // Preserve the signed-session secret so importing a backup doesn't log the
-  // market maker out (the admin cookie is signed with it).
-  if (current.settings && current.settings.sessionSecret) {
-    restored.settings.sessionSecret = current.settings.sessionSecret;
+  // Carry over operational settings that must not be reset by an import:
+  //  - sessionSecret: so importing doesn't invalidate the admin cookie / log out
+  //  - _resetApplied: so a lingering RESET_DATA env var doesn't re-fire a wipe
+  //    on the next boot just because the import replaced the settings block
+  if (current.settings) {
+    if (current.settings.sessionSecret) restored.settings.sessionSecret = current.settings.sessionSecret;
+    if (current.settings._resetApplied !== undefined) restored.settings._resetApplied = current.settings._resetApplied;
   }
   await saveData(restored);
   res.json({ ok: true });
