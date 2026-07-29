@@ -885,11 +885,20 @@ app.get('/api/admin/exposure', requireAdmin, async (req, res) => {
   res.json(exposureRows(group));
 });
 
-// Per-bettor exposure (counterparty risk / who owes whom).
+// Per-bettor exposure (counterparty risk / who owes whom) for one group.
 app.get('/api/admin/bettor-exposure', requireAdmin, async (req, res) => {
   const data = await loadData();
   const group = getGroup(data, req.query.g);
   res.json(bettorExposureRows(group));
+});
+
+// Per-bettor exposure combined across ALL groups. Bettors are global and bet
+// across groups, so this is the true "who owes whom for the whole night" view.
+app.get('/api/admin/bettor-exposure-all', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const allBets = [];
+  GROUP_IDS.forEach(gid => data.groups[gid].bets.forEach(b => allBets.push(b)));
+  res.json(bettorExposureRows({ bettors: data.bettors, bets: allBets, players: [] }));
 });
 
 // Combined summary across all groups

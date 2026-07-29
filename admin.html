@@ -220,10 +220,11 @@
       </table>
     </div>
 
-    <div class="section-title" style="margin-top:20px;">Exposure by bettor</div>
+    <div class="section-title" style="margin-top:20px;">Exposure by bettor <span class="small" style="font-weight:400;">(all groups combined)</span></div>
     <div class="card small" style="margin-bottom:8px;">
-      Counterparty risk &mdash; who owes whom. <strong>Net exposure</strong> is each bettor's directional lean
-      (over minus under). <strong>Settled balance</strong> is the running amount to square up (+ = you owe them).
+      Counterparty risk &mdash; who owes whom, summed across LA + London + Singapore (bettors are global).
+      <strong>Net exposure</strong> is each bettor's directional lean (over minus under).
+      <strong>Settled balance</strong> is the running amount to square up (+ = you owe them).
     </div>
     <div class="card" style="overflow-x:auto;">
       <table>
@@ -1227,7 +1228,7 @@ async function loadBettorExposure() {
   const body = document.getElementById('bettorExposureBody');
   const foot = document.getElementById('bettorExposureFoot');
   if (!body || !foot) return;
-  const res = await adminFetch(gg('/api/admin/bettor-exposure'));
+  const res = await adminFetch('/api/admin/bettor-exposure-all');
   const data = await res.json();
   if (unchanged('bettorExposure', data)) return;
   body.innerHTML = '';
