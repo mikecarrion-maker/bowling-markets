@@ -1336,7 +1336,10 @@ function renderMarketRuns() {
     return;
   }
   const maxLen = Math.max(...open.map(p => p.name.length));
-  const lines = open.map(p => `${p.name.padEnd(maxLen + 2)} ${p.bid} / ${p.offer}`);
+  const priceStrs = open.map(p => `${p.bid} / ${p.offer}`);
+  const maxPrice = Math.max(...priceStrs.map(s => s.length));
+  const lines = open.map((p, i) =>
+    `${p.name.padEnd(maxLen + 2)} ${priceStrs[i].padEnd(maxPrice + 2)} (${p.bidSize} x ${p.offerSize})`);
   lines.push('');
   lines.push(`Bet here: https://bowling-markets.onrender.com/?g=${currentGroup}`);
   el.textContent = lines.join('\n');
