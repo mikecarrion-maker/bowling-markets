@@ -1328,21 +1328,27 @@ async function loadCombined() {
 
 // ---------- live market runs ----------
 
-function renderMarketRuns() {
+async function renderMarketRuns() {
   const el = document.getElementById('marketRunsTable');
-  const open = players.filter(p => p.status === 'open' || p.status === 'paused');
-  if (open.length === 0) {
-    el.textContent = '(No open markets yet)';
-    return;
+  if (!el) return;
+  // Include every group's markets in one block, not just the current tab, so the
+  // copy/paste covers everyone. Uses the public players endpoint per group.
+  const blocks = [];
+  for (const gid of ['la', 'london', 'sg']) {
+    let markets;
+    try { markets = await (await fetch('/api/players?g=' + gid)).json(); } catch (e) { continue; }
+    const open = (markets || []).filter(p => p.status === 'open' || p.status === 'paused');
+    if (open.length === 0) continue;
+    const maxLen = Math.max(...open.map(p => p.name.length));
+    const priceStrs = open.map(p => `${p.bid} / ${p.offer}`);
+    const maxPrice = Math.max(...priceStrs.map(s => s.length));
+    const lines = open.map((p, i) =>
+      `  ${p.name.padEnd(maxLen + 2)} ${priceStrs[i].padEnd(maxPrice + 2)} (${p.bidSize} x ${p.offerSize})`);
+    blocks.push((groupNames[gid] || gid) + '\n' + lines.join('\n'));
   }
-  const maxLen = Math.max(...open.map(p => p.name.length));
-  const priceStrs = open.map(p => `${p.bid} / ${p.offer}`);
-  const maxPrice = Math.max(...priceStrs.map(s => s.length));
-  const lines = open.map((p, i) =>
-    `${p.name.padEnd(maxLen + 2)} ${priceStrs[i].padEnd(maxPrice + 2)} (${p.bidSize} x ${p.offerSize})`);
-  lines.push('');
-  lines.push(`Bet here: https://bowling-markets.onrender.com/?g=${currentGroup}`);
-  el.textContent = lines.join('\n');
+  if (blocks.length === 0) { el.textContent = '(No open markets yet)'; return; }
+  blocks.push('Bet here: https://bowling-markets.onrender.com/');
+  el.textContent = blocks.join('\n\n');
 }
 
 async function copyMarketRuns() {
