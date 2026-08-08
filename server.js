@@ -902,6 +902,42 @@ app.get('/api/admin/bettor-exposure-all', requireAdmin, async (req, res) => {
   res.json(bettorExposureRows({ bettors: data.bettors, bets: allBets, players: [] }));
 });
 
+// End-of-event settlement: every bowler (for score entry) plus a per-bettor
+// payout rollup with the underlying settled bets, combined across all groups.
+// net > 0 means the market maker owes the bettor; net < 0 the bettor owes.
+app.get('/api/admin/settlement', requireAdmin, async (req, res) => {
+  const data = await loadData();
+  const SETTLED = ['won', 'lost', 'push', 'voided', 'cancelled'];
+  const byName = new Map();
+  const bowlers = [];
+  let unsettled = 0;
+  GROUP_IDS.forEach(gid => {
+    const g = data.groups[gid];
+    const names = Object.fromEntries(g.players.map(p => [p.id, p.name]));
+    g.players.forEach(p => {
+      if (p.status === 'voided') return;
+      if (p.status !== 'settled') unsettled++;
+      bowlers.push({ id: p.id, group: gid, name: p.name, bid: p.bid, offer: p.offer,
+                     status: p.status, finalScore: p.finalScore });
+    });
+    g.bets.forEach(b => {
+      if (!SETTLED.includes(b.status)) return;
+      const key = b.bettorName.toLowerCase();
+      if (!byName.has(key)) byName.set(key, { name: b.bettorName, net: 0, bets: [] });
+      const rec = byName.get(key);
+      const net = round2((b.payout == null ? 0 : b.payout) - b.stake);
+      const level = b.price ? (b.side === 'under' ? b.price.bid : b.price.offer)
+                  : (b.proposedLevel != null ? b.proposedLevel : null);
+      rec.bets.push({ playerName: names[b.playerId] || '?', group: gid, side: b.side,
+                      level, stake: b.stake, status: b.status, payout: b.payout, net });
+      rec.net = round2(rec.net + net);
+    });
+  });
+  const rows = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const total = round2(rows.reduce((s, r) => s + r.net, 0));
+  res.json({ bowlers, rows, total, unsettledBowlers: unsettled });
+});
+
 // Combined summary across all groups
 app.get('/api/admin/summary', requireAdmin, async (req, res) => {
   const data = await loadData();

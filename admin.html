@@ -154,6 +154,7 @@
     <button class="group-tab" id="tab-london" onclick="switchGroup('london')">London Bowlers</button>
     <button class="group-tab" id="tab-sg" onclick="switchGroup('sg')">Singapore Bowlers</button>
     <button class="group-tab combined-tab" id="tab-combined" onclick="switchGroup('combined')">Combined</button>
+    <button class="group-tab combined-tab" id="tab-settle" onclick="switchGroup('settle')">Settle / Payouts</button>
     <button class="btn secondary" id="refreshBtn" onclick="refreshNow()" style="margin-left:auto; align-self:center;">↻ Refresh</button>
   </div>
 
@@ -347,6 +348,22 @@
     <div id="combinedContent"></div>
   </div>
 
+  <!-- Settlement view (shown when currentGroup === 'settle') -->
+  <div id="settleView" class="hidden">
+    <div class="section-title">Enter final scores</div>
+    <div class="card small" style="margin-bottom:8px;">
+      Type each bowler's final score and press Enter to settle that market. Bets are graded against the
+      level they were struck at. The payouts below update as you go. <span id="settleRemaining"></span>
+    </div>
+    <div class="card" id="settleScores" style="font-family:monospace; font-size:13px; overflow-x:auto;"></div>
+
+    <div class="section-title" style="margin-top:20px;">Payouts <span class="small" style="font-weight:400;">(all groups; + = you owe them, &minus; = they owe you)</span></div>
+    <div id="settlePayoutSummary" style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px;"></div>
+    <div class="card" style="overflow-x:auto;">
+      <div id="settlePayouts"></div>
+    </div>
+  </div>
+
 </main>
 
 <!-- Login modal -->
@@ -466,19 +483,22 @@ function switchGroup(gid) {
   currentGroup = gid;
 
   // Update tab active state
-  ['la', 'london', 'sg', 'combined'].forEach(g => {
+  ['la', 'london', 'sg', 'combined', 'settle'].forEach(g => {
     document.getElementById('tab-' + g).classList.toggle('active', g === gid);
   });
 
   // Show/hide views
-  const isGroup = gid !== 'combined';
+  const isGroup = gid !== 'combined' && gid !== 'settle';
   document.getElementById('groupView').classList.toggle('hidden', !isGroup);
-  document.getElementById('combinedView').classList.toggle('hidden', isGroup);
+  document.getElementById('combinedView').classList.toggle('hidden', gid !== 'combined');
+  document.getElementById('settleView').classList.toggle('hidden', gid !== 'settle');
 
   updateTabLabels();
 
   if (gid === 'combined') {
     loadCombined();
+  } else if (gid === 'settle') {
+    loadSettlement();
   } else {
     openCounterBetId = null;
     loadAll();
@@ -1663,12 +1683,128 @@ function renderBetRow(body, b) {
 // ---------- bootstrap ----------
 
 async function loadAll() {
-  if (currentGroup === 'combined') {
-    await loadCombined();
-    return;
-  }
+  if (currentGroup === 'combined') { await loadCombined(); return; }
+  if (currentGroup === 'settle') { await loadSettlement(); return; }
   await loadPlayers();
   await Promise.all([loadPending(), loadExposure(), loadBets(), loadBettors()]);
+}
+
+// ---------- settlement / payouts ----------
+
+const payoutExpanded = new Set();
+
+async function loadSettlement() {
+  const res = await adminFetch('/api/admin/settlement');
+  const data = await res.json();
+  if (unchanged('settlement', data)) return;
+  renderSettleScores(data.bowlers || [], data.unsettledBowlers || 0);
+  renderPayouts(data.rows || [], data.total || 0);
+}
+
+function renderSettleScores(bowlers, unsettled) {
+  const el = document.getElementById('settleScores');
+  const rem = document.getElementById('settleRemaining');
+  if (!el) return;
+  // Preserve any scores already typed but not yet settled.
+  const typed = {};
+  el.querySelectorAll('input[data-pid]').forEach(i => { if (i.value) typed[i.dataset.pid] = i.value; });
+  rem.textContent = unsettled > 0 ? `${unsettled} bowler${unsettled !== 1 ? 's' : ''} still to settle.` : 'All bowlers settled.';
+
+  let html = '';
+  ['la', 'london', 'sg'].forEach(gid => {
+    const rows = bowlers.filter(b => b.group === gid);
+    if (!rows.length) return;
+    html += `<div style="font-weight:700; margin:8px 0 4px;">${escapeHtml(groupNames[gid] || gid)}</div>`;
+    rows.forEach(b => {
+      const line = `${b.bid} / ${b.offer}`;
+      if (b.status === 'settled') {
+        html += `<div style="display:flex; align-items:center; gap:10px; padding:3px 0;">
+          <span style="flex:1;">${escapeHtml(b.name)}</span>
+          <span style="color:#9ca3af; width:80px;">${line}</span>
+          <span style="color:var(--green); font-weight:700; width:90px;">✓ ${b.finalScore}</span>
+          <button class="btn secondary" style="padding:1px 8px; font-size:11px;" onclick="reopenSettle('${b.id}','${b.group}')">reopen</button>
+        </div>`;
+      } else {
+        const val = typed[b.id] || '';
+        html += `<div style="display:flex; align-items:center; gap:10px; padding:3px 0;">
+          <span style="flex:1;">${escapeHtml(b.name)}</span>
+          <span style="color:#9ca3af; width:80px;">${line}</span>
+          <input data-pid="${b.id}" type="number" step="1" value="${val}" placeholder="score" style="width:80px; font-size:13px;" onkeydown="if(event.key==='Enter'){settleScore('${b.id}','${b.group}',this);}" />
+          <button class="btn" style="padding:2px 10px; font-size:12px;" onclick="settleScore('${b.id}','${b.group}', this.previousElementSibling)">Settle</button>
+        </div>`;
+      }
+    });
+  });
+  el.innerHTML = html || '<div class="small">No bowlers yet.</div>';
+}
+
+async function settleScore(pid, gid, inputEl) {
+  const v = Number(inputEl.value);
+  if (inputEl.value === '' || isNaN(v)) { showToast('Enter a score first.'); return; }
+  const res = await adminFetch(`/api/players/${pid}/settle?g=${gid}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ finalScore: v })
+  });
+  if (!res.ok) { const d = await res.json().catch(() => ({})); showToast(d.error || 'Settle failed.'); return; }
+  showToast('Settled.');
+  forceFullRerender();
+  await loadSettlement();
+}
+
+async function reopenSettle(pid, gid) {
+  const res = await adminFetch(`/api/players/${pid}/reopen?g=${gid}`, { method: 'POST' });
+  if (!res.ok) { showToast('Reopen failed.'); return; }
+  showToast('Market reopened.');
+  forceFullRerender();
+  await loadSettlement();
+}
+
+function payoutMoney(v) {
+  if (v > 0) return `<span style="color:var(--green); font-weight:700;">+$${v}</span>`;
+  if (v < 0) return `<span style="color:var(--red); font-weight:700;">-$${Math.abs(v)}</span>`;
+  return `<span style="color:#9ca3af;">$0</span>`;
+}
+
+function renderPayouts(rows, total) {
+  const el = document.getElementById('settlePayouts');
+  const sum = document.getElementById('settlePayoutSummary');
+  if (!el) return;
+  if (!rows.length) { el.innerHTML = '<div class="small">No settled bets yet — enter scores above.</div>'; sum.innerHTML = ''; return; }
+  sum.innerHTML = `<div style="min-width:180px; border-radius:8px; padding:12px 16px; background:#f3f4f6;">
+      <div class="small">Net owed to bettors</div>
+      <div style="font-size:22px; font-weight:700;">${payoutMoney(total)}</div>
+    </div>`;
+  el.innerHTML = rows.map(r => {
+    const id = 'pex-' + r.name.replace(/[^a-z0-9]/gi, '_');
+    const open = payoutExpanded.has(r.name);
+    const bets = r.bets.map(b => {
+      const lvl = b.level != null ? b.level : '—';
+      const side = b.side === 'under' ? 'Under' : 'Over';
+      return `<div style="display:flex; gap:10px; padding:3px 0 3px 24px; font-size:12px; color:var(--grey); border-top:1px solid var(--border);">
+        <span style="flex:1;">${escapeHtml(b.playerName)} <span style="color:#9ca3af;">(${escapeHtml(groupNames[b.group] || b.group)})</span></span>
+        <span style="width:110px;">${side} @ ${lvl}</span>
+        <span style="width:50px;">$${b.stake}</span>
+        <span style="width:64px;">${b.status}</span>
+        <span style="width:70px; text-align:right;">${payoutMoney(b.net)}</span>
+      </div>`;
+    }).join('');
+    return `<div style="border-top:1px solid var(--border);">
+      <div style="display:flex; align-items:center; gap:10px; padding:8px 6px; cursor:pointer;" onclick="togglePayout('${id}','${r.name.replace(/'/g,"\\'")}')">
+        <span id="${id}-arrow" style="width:14px; color:var(--grey);">${open ? '▾' : '▸'}</span>
+        <span style="flex:1; font-weight:600;">${escapeHtml(r.name)}</span>
+        <span>${payoutMoney(r.net)}</span>
+      </div>
+      <div id="${id}" class="${open ? '' : 'hidden'}" style="padding-bottom:6px;">${bets || '<div class="small" style="padding-left:24px;">No settled bets.</div>'}</div>
+    </div>`;
+  }).join('');
+}
+
+function togglePayout(id, name) {
+  const el = document.getElementById(id);
+  const arrow = document.getElementById(id + '-arrow');
+  const hidden = el.classList.toggle('hidden');
+  if (arrow) arrow.textContent = hidden ? '▸' : '▾';
+  if (hidden) payoutExpanded.delete(name); else payoutExpanded.add(name);
 }
 
 async function init() {

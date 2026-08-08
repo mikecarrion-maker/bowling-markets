@@ -67,6 +67,7 @@
     </table>
     <div id="noBets" class="small hidden">No bets found for that name yet.</div>
     <div id="betsError" class="small hidden" style="color:var(--red);">Incorrect PIN for that name.</div>
+    <div id="myNet" class="hidden" style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);"></div>
   </div>
 </main>
 
@@ -364,6 +365,7 @@ async function loadMyBets(opts = {}) {
     body.innerHTML = '';
     noBets.classList.add('hidden');
     errEl.classList.add('hidden');
+    renderMyNet([]);
     _lastBetsSig = null;
     return;
   }
@@ -396,6 +398,7 @@ async function loadMyBets(opts = {}) {
   errEl.classList.add('hidden');
   if (all.length === 0) {
     noBets.classList.remove('hidden');
+    renderMyNet([]);
     return;
   }
 
@@ -450,6 +453,29 @@ async function loadMyBets(opts = {}) {
     `;
     body.appendChild(tr);
   });
+
+  renderMyNet(all);
+}
+
+// Personal settle-up line: net across the bettor's own settled bets.
+// + = the market maker owes you, - = you owe the market maker.
+function renderMyNet(all) {
+  const el = document.getElementById('myNet');
+  if (!el) return;
+  const SETTLED = ['won', 'lost', 'push', 'voided', 'cancelled'];
+  const settled = (all || []).filter(b => SETTLED.includes(b.status));
+  if (settled.length === 0) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const net = Math.round(settled.reduce((s, b) => s + ((b.payout == null ? 0 : b.payout) - b.stake), 0) * 100) / 100;
+  let label, color;
+  if (net > 0) { label = `You're owed $${net}`; color = 'var(--green)'; }
+  else if (net < 0) { label = `You owe $${Math.abs(net)}`; color = 'var(--red)'; }
+  else { label = 'All square — $0'; color = '#6b7280'; }
+  el.innerHTML = `<div style="display:flex; align-items:baseline; gap:8px;">
+      <span class="small" style="color:#6b7280;">Settle-up:</span>
+      <span style="font-size:20px; font-weight:700; color:${color};">${label}</span>
+    </div>
+    <div class="small" style="color:#9ca3af; margin-top:2px;">Net across your settled bets. The market maker squares up from this.</div>`;
+  el.classList.remove('hidden');
 }
 
 // ---------- proposals (RFQ) ----------
